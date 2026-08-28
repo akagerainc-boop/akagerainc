@@ -408,9 +408,38 @@ def put_pricing(pricing: list = Body(...), actor: dict = Depends(admin_guard), d
 
 
 # --------------------------------------------------------------------------
-#  File uploads (images / product assets / installers)
+#  File uploads
+#
+#  Images are stored in the DB (or Cloudinary if CLOUDINARY_URL is set) so they
+#  survive redeploys on ephemeral hosts like Render. Installer binaries still go
+#  to disk (too big for the DB) — prefer pasting an external download URL.
 # --------------------------------------------------------------------------
+from media_storage import process_image, cloudinary_upload
+
+
+def _persist_image(db: Session, raw: bytes, filename: str, profile: str = "misc",
+                   page_type: str | None = None, app_id: int | None = None,
+                   service_id: int | None = None, alt_text: str | None = None) -> Image:
+    cloud_url = cloudinary_upload(raw, filename)
+    if cloud_url:
+        img = Image(url=cloud_url, data=None, filename=filename, mime_type="image/jpeg",
+                    alt_text=alt_text or (filename or "image").rsplit(".", 1)[0],
+                    page_type=page_type, app_id=app_id, service_id=service_id, is_active=True)
+    else:
+        blob, mime, _ext = process_image(raw, filename, profile)
+        order = db.query(Image).filter(Image.page_type == page_type).count() if page_type else 0
+        img = Image(url=None, data=blob, filename=filename, mime_type=mime,
+                    alt_text=alt_text or (filename or "image").rsplit(".", 1)[0],
+                    page_type=page_type, app_id=app_id, service_id=service_id,
+                    order=order, is_active=True)
+    db.add(img)
+    db.commit()
+    db.refresh(img)
+    return img
+
+
 async def _store(file: UploadFile, folder: str, kind: str = "image") -> dict:
+    """Legacy disk store — used only for installer binaries now."""
     data = await file.read()
     validate_upload(file.filename, len(data), kind=kind)
     d = Path(f"uploads/{folder}")
@@ -421,14 +450,27 @@ async def _store(file: UploadFile, folder: str, kind: str = "image") -> dict:
     return {"path": f"uploads/{folder}/{name}", "size": len(data), "filename": file.filename}
 
 
+_PROFILE_BY_FOLDER = {
+    "products": "cover", "services": "cover", "logo": "logo", "logos": "logo",
+    "icon": "icon", "icons": "icon", "avatars": "avatar", "testimonials": "avatar",
+    "screenshots": "screenshot", "blog": "cover", "case-studies": "cover",
+}
+
+
 @admin_router.post("/upload")
 async def upload_asset(file: UploadFile = File(...), folder: str = Form("misc"),
-                       kind: str = Form("image"), actor: dict = Depends(admin_guard)):
+                       kind: str = Form("image"), actor: dict = Depends(admin_guard),
+                       db: Session = Depends(get_db)):
+    data = await file.read()
     try:
-        info = await _store(file, folder.strip("/") or "misc", kind)
+        validate_upload(file.filename, len(data), kind="image")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"message": "Uploaded", "url": "/" + info["path"], **info}
+    profile = _PROFILE_BY_FOLDER.get(folder.strip("/"), "misc")
+    img = _persist_image(db, data, file.filename, profile=profile)
+    _audit(db, actor, "upload", "images", img.id, {"folder": folder})
+    url = img.url if (img.url and img.url.startswith("http")) else f"/api/media/{img.id}"
+    return {"message": "Uploaded", "url": url, "path": url, "id": img.id, "filename": file.filename}
 
 
 @admin_router.post("/downloads/upload")
@@ -477,24 +519,14 @@ async def upload_image(
 ):
     data = await file.read()
     try:
-        ext = validate_upload(file.filename, len(data), kind="image")
+        validate_upload(file.filename, len(data), kind="image")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    d = Path("uploads/images")
-    d.mkdir(parents=True, exist_ok=True)
-    fname = f"{page_type}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.{ext}"
-    (d / fname).write_bytes(data)
-    mimes = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
-             "webp": "image/webp", "svg": "image/svg+xml", "avif": "image/avif"}
-    max_order = db.query(Image).filter(Image.page_type == page_type).count()
-    img = Image(url=f"uploads/images/{fname}", filename=file.filename, mime_type=mimes.get(ext, "image/jpeg"),
-                alt_text=alt_text or file.filename.rsplit(".", 1)[0], page_type=page_type,
-                app_id=app_id, service_id=service_id, order=max_order, is_active=True)
-    db.add(img)
-    db.commit()
-    db.refresh(img)
+    img = _persist_image(db, data, file.filename, profile="carousel", page_type=page_type,
+                         app_id=app_id, service_id=service_id, alt_text=alt_text or None)
     _audit(db, actor, "create", "images", img.id, {"page_type": page_type})
-    return {"message": "Image uploaded", "image_id": img.id, "url": "/" + img.url}
+    url = img.url if (img.url and img.url.startswith("http")) else f"/api/media/{img.id}"
+    return {"message": "Image uploaded", "image_id": img.id, "url": url}
 
 
 @admin_router.patch("/images/{image_id}")

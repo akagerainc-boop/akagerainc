@@ -16,15 +16,15 @@ def _num(v):
 
 
 def media_url(path: str | None) -> str | None:
-    """Normalise a stored file path to a browser URL served by /uploads."""
+    """Normalise a stored media reference to a browser URL."""
     if not path:
         return None
     if path.startswith(("http://", "https://", "data:")):
         return path
     p = path.replace("\\", "/").lstrip("/")
-    if not p.startswith("uploads/"):
-        p = f"uploads/{p}"
-    return "/" + p
+    if p.startswith(("api/", "uploads/")):
+        return "/" + p
+    return "/uploads/" + p
 
 
 def serialize_product(a) -> dict:

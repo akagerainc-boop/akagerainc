@@ -283,20 +283,23 @@ def public_images(page_type: str | None = Query(None), db: Session = Depends(get
              "page_type": i.page_type} for i in rows]
 
 
+_IMG_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
 @router.get("/media/{image_id}")
 def get_media(image_id: int, db: Session = Depends(get_db)):
+    from fastapi.responses import Response, RedirectResponse
     img = db.query(Image).filter(Image.id == image_id).first()
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
+    if img.data:
+        return Response(content=img.data, media_type=img.mime_type or "image/jpeg", headers=_IMG_CACHE)
     if img.url:
+        if img.url.startswith(("http://", "https://")):
+            return RedirectResponse(img.url)
         path = img.url if img.url.startswith("uploads/") else f"uploads/{img.url.lstrip('/')}"
         if os.path.exists(path):
-            return FileResponse(path, media_type=img.mime_type or "image/jpeg",
-                                headers={"Cache-Control": "public, max-age=31536000, immutable"})
-    if img.data:
-        from fastapi.responses import Response
-        return Response(content=img.data, media_type=img.mime_type or "image/jpeg",
-                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+            return FileResponse(path, media_type=img.mime_type or "image/jpeg", headers=_IMG_CACHE)
     raise HTTPException(status_code=404, detail="Image file missing")
 
 
