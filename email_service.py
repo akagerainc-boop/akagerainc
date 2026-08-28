@@ -17,7 +17,7 @@ RESEND_API_URL = "https://api.resend.com/emails"
 def _cfg():
     return {
         "key": os.getenv("RESEND_API_KEY", "").strip(),
-        "from": os.getenv("RESEND_FROM", "Akagera Inc <onboarding@resend.dev>").strip(),
+        "from": os.getenv("RESEND_FROM", "Prism Scanner <no-reply@akagerainc.store>").strip(),
     }
 
 
