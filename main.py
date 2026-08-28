@@ -91,17 +91,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware configuration
-_default_origins = "https://akagerainc.store,https://akagerainc.onrender.com,https://akagera-frontend.onrender.com,http://localhost:3000,http://localhost:8000"
-_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
+# CORS — a mandatory base allowlist so a mis-set ALLOWED_ORIGINS env var can never
+# lock out the production frontend; ALLOWED_ORIGINS only ADDS extra origins.
+_BASE_ORIGINS = {
+    "https://akagerainc.store",
+    "https://www.akagerainc.store",
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://localhost:5173",
+}
+_env_origins = {o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()}
+_origins = sorted(_BASE_ORIGINS | _env_origins)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
-    allow_origin_regex=r"https://.*\.onrender\.com",
+    # allow any subdomain of the known hosting providers / the store domain
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)*(akagerainc\.store|onrender\.com|vercel\.app|netlify\.app|web\.app|firebaseapp\.com)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
+print(f"[cors] allowed origins: {_origins}")
 
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
