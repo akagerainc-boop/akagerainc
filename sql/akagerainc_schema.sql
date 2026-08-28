@@ -1,12 +1,16 @@
 -- ============================================================
 --  Akagera Inc - full MySQL 8 schema  (Phase 1)
---  Fresh install:  mysql -u USER -p < akagerainc_schema.sql
---  Then seed:      python seed.py     (creates admin + demo content)
+--
+--  Run this on an EMPTY database:
+--      CREATE DATABASE akagerainc CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+--      mysql -u USER -p akagerainc < akagerainc_schema.sql
+--
+--  If your database ALREADY has the old tables, DO NOT run this file --
+--  run  001_migrate_existing.sql  instead (it adds the new columns/tables
+--  in place). This file's CREATE TABLE IF NOT EXISTS would skip existing
+--  tables and then fail on their indexes.
 -- ============================================================
-CREATE DATABASE IF NOT EXISTS akagerainc CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE akagerainc;
 SET FOREIGN_KEY_CHECKS = 0;
-
 
 CREATE TABLE IF NOT EXISTS apps (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -39,16 +43,11 @@ CREATE TABLE IF NOT EXISTS apps (
   sort_order INTEGER, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_apps_slug` (`slug`),
+  KEY `ix_apps_category` (`category`),
+  KEY `ix_apps_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_apps_category ON apps (category);
-
-
-CREATE UNIQUE INDEX ix_apps_slug ON apps (slug);
-
-CREATE INDEX ix_apps_status ON apps (status);
-
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -59,14 +58,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   meta JSON, 
   ip VARCHAR(80), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY `ix_audit_logs_actor_email` (`actor_email`),
+  KEY `ix_audit_logs_entity` (`entity`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_audit_logs_actor_email ON audit_logs (actor_email);
-
-CREATE INDEX ix_audit_logs_entity ON audit_logs (entity);
-
-
 
 CREATE TABLE IF NOT EXISTS blog_posts (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -84,16 +79,11 @@ CREATE TABLE IF NOT EXISTS blog_posts (
   published_at DATETIME, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_blog_posts_slug` (`slug`),
+  KEY `ix_blog_posts_category` (`category`),
+  KEY `ix_blog_posts_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_blog_posts_category ON blog_posts (category);
-
-
-CREATE UNIQUE INDEX ix_blog_posts_slug ON blog_posts (slug);
-
-CREATE INDEX ix_blog_posts_status ON blog_posts (status);
-
 
 CREATE TABLE IF NOT EXISTS case_studies (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -114,16 +104,11 @@ CREATE TABLE IF NOT EXISTS case_studies (
   status VARCHAR(30), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_case_studies_slug` (`slug`),
+  KEY `ix_case_studies_category` (`category`),
+  KEY `ix_case_studies_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_case_studies_category ON case_studies (category);
-
-
-CREATE UNIQUE INDEX ix_case_studies_slug ON case_studies (slug);
-
-CREATE INDEX ix_case_studies_status ON case_studies (status);
-
 
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -132,14 +117,10 @@ CREATE TABLE IF NOT EXISTS categories (
   slug VARCHAR(140), 
   sort_order INTEGER, 
   is_active BOOL, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY `ix_categories_kind` (`kind`),
+  KEY `ix_categories_slug` (`slug`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_categories_kind ON categories (kind);
-
-CREATE INDEX ix_categories_slug ON categories (slug);
-
 
 CREATE TABLE IF NOT EXISTS contact_messages (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -154,14 +135,10 @@ CREATE TABLE IF NOT EXISTS contact_messages (
   status VARCHAR(50), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY `ix_contact_messages_email` (`email`),
+  KEY `ix_contact_messages_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_contact_messages_email ON contact_messages (email);
-
-
-CREATE INDEX ix_contact_messages_status ON contact_messages (status);
-
 
 CREATE TABLE IF NOT EXISTS doc_pages (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -173,14 +150,10 @@ CREATE TABLE IF NOT EXISTS doc_pages (
   is_published BOOL, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_doc_pages_slug` (`slug`),
+  KEY `ix_doc_pages_section` (`section`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_doc_pages_section ON doc_pages (section);
-
-CREATE UNIQUE INDEX ix_doc_pages_slug ON doc_pages (slug);
-
 
 CREATE TABLE IF NOT EXISTS faqs (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -190,12 +163,9 @@ CREATE TABLE IF NOT EXISTS faqs (
   sort_order INTEGER, 
   is_active BOOL, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY `ix_faqs_category` (`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_faqs_category ON faqs (category);
-
-
 
 CREATE TABLE IF NOT EXISTS industries (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -206,12 +176,9 @@ CREATE TABLE IF NOT EXISTS industries (
   body TEXT, 
   is_active BOOL, 
   sort_order INTEGER, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_industries_slug` (`slug`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE UNIQUE INDEX ix_industries_slug ON industries (slug);
-
 
 CREATE TABLE IF NOT EXISTS internships (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -230,16 +197,11 @@ CREATE TABLE IF NOT EXISTS internships (
   status VARCHAR(30), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_internships_slug` (`slug`),
+  KEY `ix_internships_department` (`department`),
+  KEY `ix_internships_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_internships_department ON internships (department);
-
-
-CREATE UNIQUE INDEX ix_internships_slug ON internships (slug);
-
-CREATE INDEX ix_internships_status ON internships (status);
-
 
 CREATE TABLE IF NOT EXISTS job_positions (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -255,16 +217,11 @@ CREATE TABLE IF NOT EXISTS job_positions (
   status VARCHAR(30), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_job_positions_slug` (`slug`),
+  KEY `ix_job_positions_department` (`department`),
+  KEY `ix_job_positions_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_job_positions_department ON job_positions (department);
-
-
-CREATE UNIQUE INDEX ix_job_positions_slug ON job_positions (slug);
-
-CREATE INDEX ix_job_positions_status ON job_positions (status);
-
 
 CREATE TABLE IF NOT EXISTS navigation_items (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -276,14 +233,10 @@ CREATE TABLE IF NOT EXISTS navigation_items (
   sort_order INTEGER, 
   is_enabled BOOL, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(parent_id) REFERENCES navigation_items (id) ON DELETE CASCADE
+  FOREIGN KEY(parent_id) REFERENCES navigation_items (id) ON DELETE CASCADE,
+  KEY `ix_navigation_items_parent_id` (`parent_id`),
+  KEY `ix_navigation_items_location` (`location`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_navigation_items_location ON navigation_items (location);
-
-CREATE INDEX ix_navigation_items_parent_id ON navigation_items (parent_id);
-
 
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -317,16 +270,11 @@ CREATE TABLE IF NOT EXISTS services (
   portal_access_duration_days INTEGER, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_services_slug` (`slug`),
+  KEY `ix_services_category` (`category`),
+  KEY `ix_services_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_services_category ON services (category);
-
-
-CREATE UNIQUE INDEX ix_services_slug ON services (slug);
-
-CREATE INDEX ix_services_status ON services (status);
-
 
 CREATE TABLE IF NOT EXISTS site_content (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -334,12 +282,9 @@ CREATE TABLE IF NOT EXISTS site_content (
   content_value JSON NOT NULL, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_site_content_content_key` (`content_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE UNIQUE INDEX ix_site_content_content_key ON site_content (content_key);
-
-
 
 CREATE TABLE IF NOT EXISTS testimonials (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -354,8 +299,6 @@ CREATE TABLE IF NOT EXISTS testimonials (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -374,16 +317,11 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_at DATETIME, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY `ix_users_email` (`email`),
+  UNIQUE KEY `ix_users_google_id` (`google_id`),
+  KEY `ix_users_role` (`role`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE UNIQUE INDEX ix_users_email ON users (email);
-
-CREATE UNIQUE INDEX ix_users_google_id ON users (google_id);
-
-
-CREATE INDEX ix_users_role ON users (`role`);
-
 
 CREATE TABLE IF NOT EXISTS downloads (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -402,16 +340,11 @@ CREATE TABLE IF NOT EXISTS downloads (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(product_id) REFERENCES apps (id) ON DELETE CASCADE
+  FOREIGN KEY(product_id) REFERENCES apps (id) ON DELETE CASCADE,
+  KEY `ix_downloads_product_id` (`product_id`),
+  KEY `ix_downloads_platform` (`platform`),
+  KEY `ix_downloads_product_platform` (`product_id`, `platform`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_downloads_platform ON downloads (platform);
-
-CREATE INDEX ix_downloads_product_id ON downloads (product_id);
-
-CREATE INDEX ix_downloads_product_platform ON downloads (product_id, platform);
-
 
 CREATE TABLE IF NOT EXISTS images (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -429,14 +362,10 @@ CREATE TABLE IF NOT EXISTS images (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
   FOREIGN KEY(app_id) REFERENCES apps (id) ON DELETE CASCADE, 
-  FOREIGN KEY(service_id) REFERENCES services (id) ON DELETE CASCADE
+  FOREIGN KEY(service_id) REFERENCES services (id) ON DELETE CASCADE,
+  KEY `ix_images_page_type` (`page_type`),
+  KEY `ix_images_page_active` (`page_type`, `is_active`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_images_page_active ON images (page_type, is_active);
-
-CREATE INDEX ix_images_page_type ON images (page_type);
-
 
 CREATE TABLE IF NOT EXISTS internship_applications (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -453,16 +382,11 @@ CREATE TABLE IF NOT EXISTS internship_applications (
   status VARCHAR(30), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(internship_id) REFERENCES internships (id) ON DELETE CASCADE
+  FOREIGN KEY(internship_id) REFERENCES internships (id) ON DELETE CASCADE,
+  KEY `ix_internship_applications_internship_id` (`internship_id`),
+  KEY `ix_internship_applications_email` (`email`),
+  KEY `ix_internship_applications_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_internship_applications_email ON internship_applications (email);
-
-
-CREATE INDEX ix_internship_applications_internship_id ON internship_applications (internship_id);
-
-CREATE INDEX ix_internship_applications_status ON internship_applications (status);
-
 
 CREATE TABLE IF NOT EXISTS job_applications (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -475,16 +399,11 @@ CREATE TABLE IF NOT EXISTS job_applications (
   status VARCHAR(30), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(job_id) REFERENCES job_positions (id) ON DELETE CASCADE
+  FOREIGN KEY(job_id) REFERENCES job_positions (id) ON DELETE CASCADE,
+  KEY `ix_job_applications_job_id` (`job_id`),
+  KEY `ix_job_applications_email` (`email`),
+  KEY `ix_job_applications_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_job_applications_email ON job_applications (email);
-
-
-CREATE INDEX ix_job_applications_job_id ON job_applications (job_id);
-
-CREATE INDEX ix_job_applications_status ON job_applications (status);
-
 
 CREATE TABLE IF NOT EXISTS licenses (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -504,18 +423,12 @@ CREATE TABLE IF NOT EXISTS licenses (
   PRIMARY KEY (id), 
   FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE, 
   FOREIGN KEY(service_id) REFERENCES services (id), 
-  FOREIGN KEY(app_id) REFERENCES apps (id)
+  FOREIGN KEY(app_id) REFERENCES apps (id),
+  KEY `ix_licenses_user_id` (`user_id`),
+  UNIQUE KEY `ix_licenses_license_key` (`license_key`),
+  KEY `ix_licenses_status` (`status`),
+  KEY `ix_licenses_is_active` (`is_active`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_licenses_is_active ON licenses (is_active);
-
-CREATE UNIQUE INDEX ix_licenses_license_key ON licenses (license_key);
-
-CREATE INDEX ix_licenses_status ON licenses (status);
-
-CREATE INDEX ix_licenses_user_id ON licenses (user_id);
-
 
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -527,14 +440,10 @@ CREATE TABLE IF NOT EXISTS notifications (
   is_read BOOL, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
+  KEY `ix_notifications_user_id` (`user_id`),
+  KEY `ix_notifications_is_read` (`is_read`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_notifications_is_read ON notifications (is_read);
-
-CREATE INDEX ix_notifications_user_id ON notifications (user_id);
-
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -548,16 +457,11 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
+  UNIQUE KEY `ix_orders_order_ref` (`order_ref`),
+  KEY `ix_orders_user_id` (`user_id`),
+  KEY `ix_orders_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE UNIQUE INDEX ix_orders_order_ref ON orders (order_ref);
-
-CREATE INDEX ix_orders_status ON orders (status);
-
-CREATE INDEX ix_orders_user_id ON orders (user_id);
-
 
 CREATE TABLE IF NOT EXISTS service_fields (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -571,12 +475,9 @@ CREATE TABLE IF NOT EXISTS service_fields (
   sort_order INTEGER, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(service_id) REFERENCES services (id) ON DELETE CASCADE
+  FOREIGN KEY(service_id) REFERENCES services (id) ON DELETE CASCADE,
+  KEY `ix_service_fields_service_id` (`service_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_service_fields_service_id ON service_fields (service_id);
-
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -595,14 +496,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
+  KEY `ix_subscriptions_user_id` (`user_id`),
+  KEY `ix_subscriptions_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_subscriptions_status ON subscriptions (status);
-
-CREATE INDEX ix_subscriptions_user_id ON subscriptions (user_id);
-
 
 CREATE TABLE IF NOT EXISTS support_tickets (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -617,18 +514,12 @@ CREATE TABLE IF NOT EXISTS support_tickets (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL
+  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL,
+  UNIQUE KEY `ix_support_tickets_ticket_ref` (`ticket_ref`),
+  KEY `ix_support_tickets_user_id` (`user_id`),
+  KEY `ix_support_tickets_email` (`email`),
+  KEY `ix_support_tickets_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_support_tickets_email ON support_tickets (email);
-
-
-CREATE INDEX ix_support_tickets_status ON support_tickets (status);
-
-CREATE UNIQUE INDEX ix_support_tickets_ticket_ref ON support_tickets (ticket_ref);
-
-CREATE INDEX ix_support_tickets_user_id ON support_tickets (user_id);
-
 
 CREATE TABLE IF NOT EXISTS invoices (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -641,16 +532,11 @@ CREATE TABLE IF NOT EXISTS invoices (
   issued_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
   FOREIGN KEY(order_id) REFERENCES orders (id) ON DELETE CASCADE, 
-  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+  FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
+  UNIQUE KEY `ix_invoices_invoice_ref` (`invoice_ref`),
+  KEY `ix_invoices_order_id` (`order_id`),
+  KEY `ix_invoices_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE UNIQUE INDEX ix_invoices_invoice_ref ON invoices (invoice_ref);
-
-CREATE INDEX ix_invoices_order_id ON invoices (order_id);
-
-CREATE INDEX ix_invoices_user_id ON invoices (user_id);
-
 
 CREATE TABLE IF NOT EXISTS license_activations (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -661,12 +547,9 @@ CREATE TABLE IF NOT EXISTS license_activations (
   activated_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(license_id) REFERENCES licenses (id) ON DELETE CASCADE
+  FOREIGN KEY(license_id) REFERENCES licenses (id) ON DELETE CASCADE,
+  KEY `ix_license_activations_license_id` (`license_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_license_activations_license_id ON license_activations (license_id);
-
 
 CREATE TABLE IF NOT EXISTS order_items (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -680,12 +563,9 @@ CREATE TABLE IF NOT EXISTS order_items (
   form_data JSON, 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(order_id) REFERENCES orders (id) ON DELETE CASCADE
+  FOREIGN KEY(order_id) REFERENCES orders (id) ON DELETE CASCADE,
+  KEY `ix_order_items_order_id` (`order_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_order_items_order_id ON order_items (order_id);
-
 
 CREATE TABLE IF NOT EXISTS payments (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -709,14 +589,10 @@ CREATE TABLE IF NOT EXISTS payments (
   FOREIGN KEY(order_id) REFERENCES orders (id) ON DELETE SET NULL, 
   UNIQUE (stripe_transaction_id), 
   UNIQUE (paypal_order_id), 
-  FOREIGN KEY(service_id) REFERENCES services (id)
+  FOREIGN KEY(service_id) REFERENCES services (id),
+  KEY `ix_payments_order_id` (`order_id`),
+  KEY `ix_payments_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_payments_order_id ON payments (order_id);
-
-CREATE INDEX ix_payments_status ON payments (status);
-
 
 CREATE TABLE IF NOT EXISTS ticket_messages (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -726,12 +602,9 @@ CREATE TABLE IF NOT EXISTS ticket_messages (
   attachment_path VARCHAR(500), 
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
   PRIMARY KEY (id), 
-  FOREIGN KEY(ticket_id) REFERENCES support_tickets (id) ON DELETE CASCADE
+  FOREIGN KEY(ticket_id) REFERENCES support_tickets (id) ON DELETE CASCADE,
+  KEY `ix_ticket_messages_ticket_id` (`ticket_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-
-CREATE INDEX ix_ticket_messages_ticket_id ON ticket_messages (ticket_id);
-
 
 CREATE TABLE IF NOT EXISTS business_tokens (
   id INTEGER NOT NULL AUTO_INCREMENT, 
@@ -748,22 +621,14 @@ CREATE TABLE IF NOT EXISTS business_tokens (
   PRIMARY KEY (id), 
   FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE, 
   FOREIGN KEY(service_id) REFERENCES services (id), 
-  FOREIGN KEY(payment_id) REFERENCES payments (id)
+  FOREIGN KEY(payment_id) REFERENCES payments (id),
+  KEY `ix_business_tokens_user_id` (`user_id`),
+  KEY `ix_business_tokens_service_id` (`service_id`),
+  KEY `ix_business_tokens_payment_id` (`payment_id`),
+  KEY `ix_business_tokens_business_name` (`business_name`),
+  KEY `ix_business_tokens_category` (`category`),
+  UNIQUE KEY `ix_business_tokens_token` (`token`),
+  KEY `ix_business_tokens_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE INDEX ix_business_tokens_business_name ON business_tokens (business_name);
-
-CREATE INDEX ix_business_tokens_category ON business_tokens (category);
-
-
-CREATE INDEX ix_business_tokens_payment_id ON business_tokens (payment_id);
-
-CREATE INDEX ix_business_tokens_service_id ON business_tokens (service_id);
-
-CREATE INDEX ix_business_tokens_status ON business_tokens (status);
-
-CREATE UNIQUE INDEX ix_business_tokens_token ON business_tokens (token);
-
-CREATE INDEX ix_business_tokens_user_id ON business_tokens (user_id);
 
 SET FOREIGN_KEY_CHECKS = 1;

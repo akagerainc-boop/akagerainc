@@ -7,7 +7,7 @@
 --  file covers site content + navigation + a minimal catalog so the
 --  site renders immediately.
 -- ============================================================
-USE akagerainc;
+-- (select your database first, e.g.  USE your_db_name;)
 
 INSERT INTO site_content (content_key, content_value) VALUES ('brand', '{"name": "Akagera Inc", "tagline": "Technology solutions built for what comes next.", "primary_color": "#BD4A39", "ink": "#141414", "paper": "#FFFFFF", "logo": "/assets/inc.png"}') ON DUPLICATE KEY UPDATE content_value = VALUES(content_value);
 INSERT INTO site_content (content_key, content_value) VALUES ('hero', '{"kicker": "Akagera Inc \\u2014 Software Solutions", "title": "Technology Solutions Built for What Comes Next.", "subtitle": "Akagera Inc builds mobile apps, websites, desktop software, SaaS products, and custom digital solutions that help individuals, businesses, and organizations turn ideas into reliable technology.", "primary_cta": {"label": "Explore Our Solutions", "url": "/solutions"}, "secondary_cta": {"label": "Start a Project", "url": "/contact?intent=project"}}') ON DUPLICATE KEY UPDATE content_value = VALUES(content_value);
