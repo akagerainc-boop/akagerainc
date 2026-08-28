@@ -27,20 +27,62 @@ load_dotenv(BACKEND_DIR / ".env")
 # ==================== DATABASE SETUP (WORKING VERSION) ====================
 from database import engine, get_db, Base, SessionLocal
 from models import User, App, Service, Payment, License, ContactMessage, BusinessToken
-from models import SiteContent
+from models import SiteContent, Order
 import schemas
 from utils import generate_license_key, generate_hex_license_key, slugify
 from admin import admin_router
+from routers import auth as auth_router
+from routers import public as public_router
+from routers import orders as orders_router
+from routers import subscriptions as subscriptions_router
+from routers import support as support_router
+from routers import applications as applications_router
+from payments.service import finalize_payment
+
+
+def _safe_print(msg: str) -> None:
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode("ascii", "replace").decode("ascii"))
+
 
 def initialize_database() -> None:
     try:
         Base.metadata.create_all(bind=engine)
-        print("✅ Database tables initialized")
+        _safe_print("[db] tables initialized")
     except Exception as exc:
-        print(f"⚠️ Database initialization skipped: {exc}")
+        _safe_print(f"[db] initialization skipped: {exc}")
 
 
 initialize_database()
+
+
+def _bootstrap_admin_and_content() -> None:
+    """Idempotently ensure the super-admin + default CMS content exist."""
+    try:
+        import seed as _seed
+        db = SessionLocal()
+        try:
+            _seed.seed_site_content(db)
+            _seed.seed_admin(db)
+            _seed.seed_navigation(db)
+        finally:
+            db.close()
+    except Exception as exc:
+        print(f"⚠️ Admin/content bootstrap skipped: {exc}")
+
+
+_bootstrap_admin_and_content()
+
+
+def _resolve_order_ref(db: Session, order_ref, payment: Payment) -> None:
+    if not order_ref:
+        return
+    order = db.query(Order).filter(Order.order_ref == order_ref).first()
+    if order and order.user_id == payment.user_id:
+        payment.order_id = order.id
+        db.commit()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -50,15 +92,12 @@ app = FastAPI(
 )
 
 # CORS middleware configuration
+_default_origins = "https://akagerainc.store,https://akagerainc.onrender.com,https://akagera-frontend.onrender.com,http://localhost:3000,http://localhost:8000"
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://akagerainc.store",
-        "https://akagerainc.onrender.com",
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "*"
-    ],
+    allow_origins=_origins,
+    allow_origin_regex=r"https://.*\.onrender\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,11 +106,29 @@ app.add_middleware(
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
-# Mount static files
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# Include admin router
+class CachedStaticFiles(StaticFiles):
+    """StaticFiles that adds long-lived immutable caching for uploaded media."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        try:
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        except Exception:
+            pass
+        return response
+
+
+app.mount("/uploads", CachedStaticFiles(directory="uploads"), name="uploads")
+
+# Routers
 app.include_router(admin_router)
+app.include_router(auth_router.router)
+app.include_router(public_router.router)
+app.include_router(orders_router.router)
+app.include_router(subscriptions_router.router)
+app.include_router(support_router.router)
+app.include_router(applications_router.router)
 
 
 SITE_CONTENT = {
@@ -306,6 +363,7 @@ class MomoPaymentRequest(BaseModel):
     currency: str = "USD"
     user_id: int
     phone_number: str
+    order_ref: Optional[str] = None
 
 # Replace your existing initiate-momo endpoint with this
 @app.post("/api/payments/initiate-momo")
@@ -358,7 +416,8 @@ async def initiate_momo_payment(
                 db.add(db_payment)
                 db.commit()
                 db.refresh(db_payment)
-                
+                _resolve_order_ref(db, request.order_ref, db_payment)
+
                 return {
                     "success": True,
                     "req_ref": req_ref,
@@ -407,22 +466,10 @@ async def verify_payment_status(
         if db_payment:
             db_payment.status = normalized_status
             db_payment.transaction_id = req_ref
-            if normalized_status == "completed":
-                existing_license = db.query(License).filter(
-                    License.user_id == db_payment.user_id,
-                    License.service_id == db_payment.service_id,
-                ).first()
-                if not existing_license:
-                    license_key = generate_license_key()
-                    db_license = License(
-                        user_id=db_payment.user_id,
-                        license_key=license_key,
-                        service_id=db_payment.service_id,
-                        is_active=True,
-                        expires_at=datetime.utcnow() + timedelta(days=365)
-                    )
-                    db.add(db_license)
+            db_payment.provider = db_payment.provider or "itec"
             db.commit()
+            if normalized_status == "completed":
+                finalize_payment(db, db_payment)
         return {"success": True, "status": normalized_status}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -551,24 +598,9 @@ async def handle_card_callback(
         # Update payment status to completed
         payment.status = "completed"
         payment.transaction_id = request.transID
+        payment.provider = payment.provider or "itec"
         db.commit()
-        
-        # Generate license if service requires it
-        if payment.service_id:
-            service = db.query(Service).filter(Service.id == payment.service_id).first()
-            if service:
-                license_key = generate_license_key()
-                db_license = License(
-                    user_id=payment.user_id,
-                    license_key=license_key,
-                    service_id=payment.service_id,
-                    is_active=True,
-                    expires_at=datetime.utcnow() + timedelta(days=365)
-                )
-                db.add(db_license)
-                db.commit()
-                print(f"License generated: {license_key} for user {payment.user_id}")
-        
+        finalize_payment(db, payment)
         return {"status": "success", "message": "Payment callback processed"}
         
     except Exception as e:
@@ -885,33 +917,20 @@ async def activate_free_service(service_id: int, user_id: int = Query(...), db: 
         service_id=service_id,
         status="completed",
         payment_method="free",
+        provider="free",
     )
     db.add(db_payment)
     db.commit()
     db.refresh(db_payment)
 
-    license_key = generate_hex_license_key(16)
-    db_license = License(
-        user_id=user_id,
-        license_key=license_key,
-        service_id=service_id,
-        is_active=True,
-        expires_at=datetime.utcnow() + timedelta(days=365),
-    )
-    db.add(db_license)
-    db.commit()
-    db.refresh(db_license)
-
-    portal_token = create_business_token_for_purchase(db, user_id, service_id, db_payment.id)
-    receipt_path = create_purchase_receipt_file(db, user_id, db_payment.id, service_id, license_key, portal_token.token if portal_token else None)
-    if receipt_path:
-        print(f"Receipt saved for free activation {db_payment.id}: {receipt_path}")
+    result = finalize_payment(db, db_payment)
     return {
         "success": True,
         "status": "completed",
         "message": "Free service access granted successfully",
-        "token": portal_token.token if portal_token else None,
-        "license_key": license_key,
+        "token": result.get("business_token"),
+        "license_key": result.get("license_key"),
+        "order_ref": result.get("order_ref"),
         "service_id": service_id,
     }
 
@@ -1123,27 +1142,10 @@ async def handle_stripe_webhook(request: Request, db: Session = Depends(get_db))
         
         if payment:
             payment.status = "completed"
+            payment.provider = payment.provider or "stripe"
             db.commit()
-            
-            if payment.service_id:
-                hex_license_key = generate_hex_license_key(16)
-                db_license = License(
-                    user_id=payment.user_id,
-                    license_key=hex_license_key,
-                    service_id=payment.service_id,
-                    is_active=True,
-                    expires_at=datetime.utcnow() + timedelta(days=365)
-                )
-                db.add(db_license)
-                db.commit()
-                db.refresh(db_license)
-                print(f"License generated for payment {payment.id}: {hex_license_key}")
+            finalize_payment(db, payment)
 
-                portal_token = create_business_token_for_purchase(db, payment.user_id, payment.service_id, payment.id)
-                receipt_path = create_purchase_receipt_file(db, payment.user_id, payment.id, payment.service_id, hex_license_key, portal_token.token if portal_token else None)
-                if receipt_path:
-                    print(f"Receipt saved for payment {payment.id}: {receipt_path}")
-    
     elif event["type"] == "payment_intent.payment_failed":
         payment_intent = event["data"]["object"]
         
@@ -1165,6 +1167,7 @@ from paypal_service import paypal_service
 async def create_paypal_order(
     request: PaymentIntentRequest,
     user_id: int = Query(...),
+    order_ref: str = Query(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -1227,7 +1230,8 @@ async def create_paypal_order(
         db.add(db_payment)
         db.commit()
         db.refresh(db_payment)
-        
+        _resolve_order_ref(db, order_ref, db_payment)
+
         return {
             "success": True,
             "paypal_order_id": paypal_order_id,
@@ -1287,35 +1291,19 @@ async def capture_paypal_order(
         
         # Update payment status
         payment.status = "completed"
+        payment.provider = payment.provider or "paypal"
         db.commit()
         db.refresh(payment)
-        
-        # Generate license if service requires it
-        if payment.service_id:
-            service = db.query(Service).filter(Service.id == payment.service_id).first()
-            if service:
-                hex_license_key = generate_hex_license_key(16)
-                db_license = License(
-                    user_id=user_id,
-                    license_key=hex_license_key,
-                    service_id=payment.service_id,
-                    is_active=True,
-                    expires_at=datetime.utcnow() + timedelta(days=365)
-                )
-                db.add(db_license)
-                db.commit()
-                db.refresh(db_license)
-                print(f"License generated for payment {payment.id}: {hex_license_key}")
 
-                portal_token = create_business_token_for_purchase(db, user_id, payment.service_id, payment.id)
-                receipt_path = create_purchase_receipt_file(db, user_id, payment.id, payment.service_id, hex_license_key, portal_token.token if portal_token else None)
-                if receipt_path:
-                    print(f"Receipt saved for payment {payment.id}: {receipt_path}")
-        
+        result = finalize_payment(db, payment)
+
         return {
             "success": True,
             "status": "completed",
             "payment_id": payment.id,
+            "order_ref": result.get("order_ref"),
+            "license_key": result.get("license_key"),
+            "business_token": result.get("business_token"),
             "message": "Payment completed successfully"
         }
     

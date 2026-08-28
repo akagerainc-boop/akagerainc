@@ -1,0 +1,34 @@
+# Environment / secrets
+.env
+.env.local
+*.env
+*.env.local
+akagerainc.env
+akagerainc.env.local
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+
+# Large uploaded binaries (installers) — images are tracked, installers are not
+uploads/**/*.apk
+uploads/**/*.ipa
+uploads/**/*.exe
+uploads/**/*.msi
+uploads/**/*.dmg
+uploads/**/*.pkg
+uploads/**/*.zip
+uploads/receipts/
+uploads/invoices/
+
+# DB / misc
+*.sqlite
+*.sqlite3
+.DS_Store
+Thumbs.db

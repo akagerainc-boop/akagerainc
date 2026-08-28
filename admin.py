@@ -1,915 +1,558 @@
 """
-Admin Management Endpoints
-Complex URL: /api/admin-xyz789-control
-Password Protected Admin Dashboard
+Admin CMS API — /api/admin/*
+
+Auth: Bearer admin JWT (from POST /api/admin/login). A legacy `?password=` query
+param is still accepted during migration so older clients keep working.
 """
 import os
-import base64
-import shutil
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query, Form, Path as FastAPIPath
+import time
+import json
+from datetime import datetime, date
+from pathlib import Path
+from typing import Optional
+
+from fastapi import (
+    APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Request, Body,
+)
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+
 from database import get_db
-from models import User, App, Service, Payment, License, Image, SiteContent
-import hashlib
-import uuid
-from pydantic import BaseModel
-from typing import List
+from models import (
+    User, App, Service, ServiceField, Download, Payment, License, Image, Order, OrderItem,
+    Subscription, Invoice, SupportTicket, TicketMessage, BlogPost, Category, Testimonial,
+    Faq, DocPage, Industry, Internship, InternshipApplication, JobPosition, JobApplication,
+    CaseStudy, NavigationItem, SiteContent, AuditLog, ContactMessage, Notification,
+)
+from auth_utils import decode_token, verify_password, create_token, ADMIN_ROLES
+from utils import slugify, validate_upload, generate_hex_license_key
+import site_defaults as sd
 
-# Admin router
-admin_router = APIRouter(prefix="/api/admin-xyz789-control", tags=["Admin"])
+admin_router = APIRouter(prefix="/api/admin", tags=["Admin"])
+_bearer = HTTPBearer(auto_error=False)
 
-# Admin password (use environment variable in production)
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@Akagera2024!")
-
-def verify_admin_password(password: str) -> bool:
-    """Verify admin password"""
-    return password == ADMIN_PASSWORD
+LEGACY_PW = os.getenv("ADMIN_PASSWORD_LEGACY", "Admin@Akagera2024!")
+ADMIN_PW = os.getenv("ADMIN_PASSWORD", "")
 
 
-def remove_stored_file(path_value: str | None) -> None:
-    """Delete a stored file from disk if it exists."""
-    if not path_value:
-        return
+# --------------------------------------------------------------------------
+#  Auth
+# --------------------------------------------------------------------------
+def admin_guard(
+    request: Request,
+    password: Optional[str] = Query(None),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> dict:
+    # 1) Bearer admin JWT
+    if creds and creds.scheme.lower() == "bearer":
+        data = decode_token(creds.credentials)
+        if data and data.get("role") in ADMIN_ROLES:
+            return {"email": data.get("email", "admin"), "role": data["role"]}
+    # 2) legacy password
+    if password and (password == LEGACY_PW or (ADMIN_PW and password == ADMIN_PW)):
+        return {"email": "legacy-admin", "role": "super_admin"}
+    raise HTTPException(status_code=401, detail="Admin authentication required")
+
+
+def _audit(db: Session, actor: dict, action: str, entity: str, entity_id, meta: dict | None = None):
     try:
-        normalized_path = path_value if path_value.startswith("uploads/") else f"uploads/{path_value}"
-        if os.path.exists(normalized_path):
-            os.remove(normalized_path)
-    except Exception as exc:
-        print(f"Warning: could not remove stored file {path_value}: {exc}")
+        db.add(AuditLog(actor_email=actor.get("email"), action=action, entity=entity,
+                        entity_id=str(entity_id), meta=meta or {}))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
-class PricingPlanItem(BaseModel):
-    name: str
-    price: str
-    description: str
-    features: List[str]
+@admin_router.post("/login")
+def admin_login(payload: dict = Body(...), db: Session = Depends(get_db)):
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    # user-based admin
+    if email:
+        user = db.query(User).filter(User.email == email).first()
+        if user and user.role in ADMIN_ROLES and verify_password(password, user.password_hash):
+            user.last_login_at = datetime.utcnow()
+            db.commit()
+            return {"access_token": create_token({"sub": str(user.id), "role": user.role, "email": user.email}),
+                    "token_type": "bearer",
+                    "admin": {"name": user.name, "email": user.email, "role": user.role}}
+    # legacy password (no email or wrong email but correct master pw)
+    if password and (password == LEGACY_PW or (ADMIN_PW and password == ADMIN_PW)):
+        return {"access_token": create_token({"sub": "0", "role": "super_admin", "email": "legacy-admin"}),
+                "token_type": "bearer",
+                "admin": {"name": "Administrator", "email": "legacy-admin", "role": "super_admin"}}
+    raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
-# ==================== DASHBOARD STATS ====================
-@admin_router.get("/stats", tags=["Admin Dashboard"])
-async def get_dashboard_stats(password: str, db: Session = Depends(get_db)):
-    """Get admin dashboard statistics"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    total_users = db.query(User).count()
-    total_apps = db.query(App).count()
-    total_services = db.query(Service).count()
-    total_payments = db.query(Payment).count()
-    
-    revenue = db.query(Payment).filter(Payment.status == "completed").all()
-    total_revenue = sum(float(p.amount) for p in revenue)
-    
+
+# --------------------------------------------------------------------------
+#  Dashboard stats
+# --------------------------------------------------------------------------
+@admin_router.get("/stats")
+def stats(actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    revenue = db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
+        Payment.status == "completed").scalar() or 0
     return {
-        "total_users": total_users,
-        "total_apps": total_apps,
-        "total_services": total_services,
-        "total_payments": total_payments,
-        "total_revenue": total_revenue,
-        "timestamp": datetime.utcnow().isoformat()
+        "total_users": db.query(User).count(),
+        "total_orders": db.query(Order).count(),
+        "total_revenue": float(revenue),
+        "active_subscriptions": db.query(Subscription).filter(Subscription.status == "active").count(),
+        "active_licenses": db.query(License).filter(License.is_active == True, License.status == "active").count(),  # noqa: E712
+        "total_products": db.query(App).count(),
+        "total_services": db.query(Service).count(),
+        "total_downloads": db.query(Download).count(),
+        "open_tickets": db.query(SupportTicket).filter(
+            SupportTicket.status.in_(["open", "in_progress", "waiting_customer"])).count(),
+        "new_messages": db.query(ContactMessage).filter(ContactMessage.status == "new").count(),
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 
-@admin_router.get("/pricing", tags=["Site Content"])
-async def get_pricing(password: str, db: Session = Depends(get_db)):
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
+# --------------------------------------------------------------------------
+#  Generic serialization for admin views
+# --------------------------------------------------------------------------
+def row_to_dict(obj) -> dict:
+    out = {}
+    for c in obj.__table__.columns:
+        v = getattr(obj, c.name)
+        if isinstance(v, (datetime, date)):
+            v = v.isoformat()
+        elif isinstance(v, bytes):
+            v = None
+        out[c.name] = v
+    return out
 
-    record = db.query(SiteContent).filter(SiteContent.content_key == "pricing").first()
-    return {"pricing": record.content_value if record and isinstance(record.content_value, list) else []}
+
+# --------------------------------------------------------------------------
+#  Generic CRUD registry
+# --------------------------------------------------------------------------
+SLUG_MODELS = {"services", "products", "blog", "case-studies", "internships", "careers", "docs", "industries"}
+
+REGISTRY = {
+    "services": Service,
+    "service-fields": ServiceField,
+    "products": App,
+    "downloads": Download,
+    "blog": BlogPost,
+    "categories": Category,
+    "testimonials": Testimonial,
+    "faqs": Faq,
+    "docs": DocPage,
+    "industries": Industry,
+    "internships": Internship,
+    "careers": JobPosition,
+    "case-studies": CaseStudy,
+    "navigation": NavigationItem,
+    "users": User,
+    "licenses": License,
+    "subscriptions": Subscription,
+    "orders": Order,
+    "contact-messages": ContactMessage,
+    "internship-applications": InternshipApplication,
+    "job-applications": JobApplication,
+    "tickets": SupportTicket,
+}
+
+READONLY = {"orders", "contact-messages", "internship-applications", "job-applications"}
+NO_CREATE = READONLY | {"users", "licenses", "subscriptions", "tickets"}
 
 
-@admin_router.put("/pricing", tags=["Site Content"])
-async def update_pricing(password: str, pricing: List[PricingPlanItem], db: Session = Depends(get_db)):
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
+def _coerce_dates(model, data: dict) -> dict:
+    for c in model.__table__.columns:
+        if c.name in data and data[c.name] not in (None, "") and str(c.type).startswith("DATE"):
+            try:
+                data[c.name] = date.fromisoformat(str(data[c.name])[:10])
+            except ValueError:
+                data.pop(c.name, None)
+    return data
 
-    payload = [item.dict() for item in pricing]
-    record = db.query(SiteContent).filter(SiteContent.content_key == "pricing").first()
 
-    if record:
-        record.content_value = payload
-        record.updated_at = datetime.utcnow()
-    else:
-        record = SiteContent(content_key="pricing", content_value=payload)
-        db.add(record)
+@admin_router.get("/resources/{name}")
+def list_resource(name: str, skip: int = 0, limit: int = 200,
+                  actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = REGISTRY.get(name)
+    if not model:
+        raise HTTPException(status_code=404, detail="Unknown resource")
+    q = db.query(model)
+    order_col = getattr(model, "sort_order", None) or getattr(model, "id")
+    rows = q.order_by(order_col).offset(skip).limit(limit).all()
+    return {"total": q.count(), "items": [row_to_dict(r) for r in rows]}
 
+
+@admin_router.post("/resources/{name}")
+def create_resource(name: str, payload: dict = Body(...),
+                    actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = REGISTRY.get(name)
+    if not model or name in NO_CREATE:
+        raise HTTPException(status_code=400, detail="Cannot create this resource")
+    cols = {c.name for c in model.__table__.columns}
+    data = {k: v for k, v in payload.items() if k in cols and k not in ("id", "created_at", "updated_at")}
+    if name in SLUG_MODELS and not data.get("slug") and data.get("name" if "name" in cols else "title"):
+        base = data.get("name") or data.get("title")
+        slug = slugify(base)
+        n = 1
+        while db.query(model).filter(model.slug == slug).first():
+            n += 1
+            slug = f"{slugify(base)}-{n}"
+        data["slug"] = slug
+    _coerce_dates(model, data)
+    obj = model(**data)
+    db.add(obj)
     db.commit()
-    return {"message": "Pricing updated successfully", "pricing": payload}
+    db.refresh(obj)
+    _audit(db, actor, "create", name, obj.id, {"name": data.get("name") or data.get("title")})
+    return row_to_dict(obj)
 
-# ==================== USER MANAGEMENT ====================
-@admin_router.get("/users", tags=["User Management"])
-async def get_all_users(password: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all users"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    users = db.query(User).offset(skip).limit(limit).all()
-    return {
-        "total": db.query(User).count(),
-        "users": [
-            {
-                "id": u.id,
-                "name": u.name,
-                "email": u.email,
-                "google_id": u.google_id,
-                "profile_picture": u.profile_picture,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-                "updated_at": u.updated_at.isoformat() if u.updated_at else None
-            } for u in users
-        ]
-    }
 
-@admin_router.delete("/users/{user_id}", tags=["User Management"])
-async def delete_user(password: str, user_id: int, db: Session = Depends(get_db)):
-    """Delete a user"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+@admin_router.patch("/resources/{name}/{item_id}")
+def update_resource(name: str, item_id: int, payload: dict = Body(...),
+                    actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = REGISTRY.get(name)
+    if not model:
+        raise HTTPException(status_code=404, detail="Unknown resource")
+    obj = db.query(model).filter(model.id == item_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Not found")
+    cols = {c.name for c in model.__table__.columns}
+    data = {k: v for k, v in payload.items() if k in cols and k not in ("id", "created_at")}
+    _coerce_dates(model, data)
+    for k, v in data.items():
+        setattr(obj, k, v)
+    if hasattr(obj, "updated_at"):
+        obj.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(obj)
+    _audit(db, actor, "update", name, obj.id, {"fields": list(data.keys())})
+    return row_to_dict(obj)
+
+
+@admin_router.delete("/resources/{name}/{item_id}")
+def delete_resource(name: str, item_id: int,
+                    actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = REGISTRY.get(name)
+    if not model or name in READONLY:
+        raise HTTPException(status_code=400, detail="Cannot delete this resource")
+    obj = db.query(model).filter(model.id == item_id).first()
+    if not obj:
+        raise HTTPException(status_code=404, detail="Not found")
+    db.delete(obj)
+    db.commit()
+    _audit(db, actor, "delete", name, item_id)
+    return {"message": "Deleted"}
+
+
+# --------------------------------------------------------------------------
+#  Detail views with relations
+# --------------------------------------------------------------------------
+@admin_router.get("/services/{sid}/fields")
+def service_fields(sid: int, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    rows = db.query(ServiceField).filter(ServiceField.service_id == sid).order_by(ServiceField.sort_order).all()
+    return [row_to_dict(r) for r in rows]
+
+
+@admin_router.get("/orders")
+def admin_orders(status: str | None = None, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    q = db.query(Order)
+    if status:
+        q = q.filter(Order.status == status)
+    rows = q.order_by(Order.created_at.desc()).limit(300).all()
+    out = []
+    for o in rows:
+        u = db.query(User).filter(User.id == o.user_id).first()
+        out.append({**row_to_dict(o), "customer": {"name": u.name, "email": u.email} if u else None,
+                    "items": [row_to_dict(i) for i in o.items]})
+    return out
+
+
+@admin_router.patch("/orders/{oid}/status")
+def set_order_status(oid: int, payload: dict = Body(...),
+                     actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    o = db.query(Order).filter(Order.id == oid).first()
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    o.status = payload.get("status", o.status)
+    db.commit()
+    _audit(db, actor, "order_status", "orders", oid, {"status": o.status})
+    return {"message": "Updated", "status": o.status}
+
+
+@admin_router.patch("/users/{uid}/role")
+def set_user_role(uid: int, payload: dict = Body(...),
+                  actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.id == uid).first()
+    if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    db.delete(user)
+    u.role = payload.get("role", u.role)
+    if "is_active" in payload:
+        u.is_active = bool(payload["is_active"])
     db.commit()
-    return {"message": "User deleted successfully"}
+    _audit(db, actor, "user_role", "users", uid, {"role": u.role})
+    return {"message": "Updated", "role": u.role, "is_active": u.is_active}
 
-# ==================== APP MANAGEMENT ====================
-@admin_router.get("/apps", tags=["App Management"])
-async def get_all_apps(password: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all apps"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    apps = db.query(App).offset(skip).limit(limit).all()
-    return {
-        "total": db.query(App).count(),
-        "apps": [
-            {
-                "id": a.id,
-                "name": a.name,
-                "description": a.description,
-                "short_description": a.short_description,
-                "requires_license": a.requires_license,
-                "download_url": a.download_url,
-                "app_icon": a.app_icon,
-                "app_logo": a.app_logo,
-                "app_image": a.app_image,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
-                "updated_at": a.updated_at.isoformat() if a.updated_at else None
-            } for a in apps
-        ]
-    }
 
-@admin_router.post("/apps", tags=["App Management"])
-async def create_app(
-    password: str = Query(...),
-    name: str = Form(...),
-    description: str = Form(...),
-    short_description: str = Form(...),
-    features: str = Form(None),
-    how_it_works: str = Form(None),
-    installation_steps: str = Form(None),
-    requires_license: bool = Form(False),
-    download_url: str = Form(None),
-    app_icon: UploadFile = File(None),
-    app_logo: UploadFile = File(None),
-    app_image: UploadFile = File(None),
-    db: Session = Depends(get_db)
-):
-    """Create a new app with full details and file uploads"""
-    try:
-        if not verify_admin_password(password):
-            raise HTTPException(status_code=401, detail="Invalid admin password")
-        
-        import json
-        from pathlib import Path
-        
-        print(f"📝 Creating app: {name}")
-        print(f"📁 Features: {features}, Installation Steps: {installation_steps}")
-        
-        # Parse JSON fields
-        features_list = None
-        if features:
-            try:
-                features_list = json.loads(features) if isinstance(features, str) and features.startswith('[') else [f.strip() for f in features.split(',') if f.strip()]
-            except (json.JSONDecodeError, Exception) as e:
-                print(f"⚠️ Features parse warning: {e}")
-                features_list = [f.strip() for f in features.split(',') if f.strip()] if isinstance(features, str) else features
-        
-        installation_steps_list = None
-        if installation_steps:
-            try:
-                installation_steps_list = json.loads(installation_steps) if isinstance(installation_steps, str) and installation_steps.startswith('[') else [s.strip() for s in installation_steps.split(',') if s.strip()]
-            except (json.JSONDecodeError, Exception) as e:
-                print(f"⚠️ Installation steps parse warning: {e}")
-                installation_steps_list = [s.strip() for s in installation_steps.split(',') if s.strip()] if isinstance(installation_steps, str) else installation_steps
-        
-        # Handle file uploads
-        app_icon_path = None
-        app_logo_path = None
-        app_image_path = None
-        
-        upload_dir = Path("uploads/apps")
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        async def save_file(file: UploadFile, prefix: str) -> str:
-            if not file:
-                return None
-            try:
-                import time
-                timestamp = str(int(time.time() * 1000))
-                file_extension = file.filename.split('.')[-1] if '.' in file.filename else 'bin'
-                filename = f"{prefix}_{timestamp}.{file_extension}"
-                file_path = upload_dir / filename
-                contents = await file.read()
-                with open(file_path, "wb") as f:
-                    f.write(contents)
-                print(f"✅ Saved {prefix} to: {filename}")
-                return f"uploads/apps/{filename}"
-            except Exception as e:
-                print(f"❌ Error saving file {prefix}: {e}")
-                return None
-        
-        app_icon_path = await save_file(app_icon, "icon")
-        app_logo_path = await save_file(app_logo, "logo")
-        app_image_path = await save_file(app_image, "image")
-        
-        # Parse requires_license
-        if isinstance(requires_license, str):
-            requires_license = requires_license.lower() in ['true', 'yes', '1']
-        
-        new_app = App(
-            name=name,
-            description=description,
-            short_description=short_description,
-            features=features_list,
-            how_it_works=how_it_works,
-            installation_steps=installation_steps_list,
-            requires_license=requires_license,
-            download_url=download_url,
-            app_icon=app_icon_path,
-            app_logo=app_logo_path,
-            app_image=app_image_path
-        )
-        db.add(new_app)
-        db.commit()
-        db.refresh(new_app)
-        
-        print(f"✅ App created successfully with ID: {new_app.id}")
-        
-        return {
-            "message": "App created successfully", 
-            "app_id": new_app.id, 
-            "app": {
-                "id": new_app.id,
-                "name": new_app.name,
-                "description": new_app.description,
-                "app_icon": app_icon_path,
-                "app_logo": app_logo_path,
-                "app_image": app_image_path
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error creating app: {str(e)}")
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error creating app: {str(e)}"
-        )
-
-@admin_router.put("/apps/{app_id}", tags=["App Management"])
-async def update_app(
-    password: str,
-    app_id: int,
-    name: str = None,
-    description: str = None,
-    short_description: str = None,
-    features: str = None,
-    how_it_works: str = None,
-    installation_steps: str = None,
-    requires_license: bool = None,
-    download_url: str = None,
-    app_icon: UploadFile = File(None),
-    app_logo: UploadFile = File(None),
-    app_image: UploadFile = File(None),
-    db: Session = Depends(get_db)
-):
-    """Update an app with all details"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    app = db.query(App).filter(App.id == app_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="App not found")
-    
-    import json
-    from pathlib import Path
-    
-    # Helper function to save file
-    async def save_file(file: UploadFile, prefix: str) -> str:
-        if not file:
-            return None
-        try:
-            timestamp = datetime.utcnow().timestamp()
-            file_extension = file.filename.split('.')[-1]
-            filename = f"{prefix}_{timestamp}.{file_extension}"
-            upload_dir = Path("uploads/apps")
-            upload_dir.mkdir(parents=True, exist_ok=True)
-            file_path = upload_dir / filename
-            contents = await file.read()
-            with open(file_path, "wb") as f:
-                f.write(contents)
-            return f"uploads/apps/{filename}"
-        except Exception as e:
-            print(f"Error saving file: {e}")
-            return None
-    
-    if name is not None:
-        app.name = name
-    if description is not None:
-        app.description = description
-    if short_description is not None:
-        app.short_description = short_description
-    if features is not None:
-        try:
-            app.features = json.loads(features) if isinstance(features, str) else features
-        except json.JSONDecodeError:
-            app.features = [f.strip() for f in features.split(',') if f.strip()]
-    if how_it_works is not None:
-        app.how_it_works = how_it_works
-    if installation_steps is not None:
-        try:
-            app.installation_steps = json.loads(installation_steps) if isinstance(installation_steps, str) else installation_steps
-        except json.JSONDecodeError:
-            app.installation_steps = [s.strip() for s in installation_steps.split(',') if s.strip()]
-    if requires_license is not None:
-        if isinstance(requires_license, str):
-            requires_license = requires_license.lower() in ['true', 'yes', '1']
-        app.requires_license = requires_license
-    if download_url is not None:
-        app.download_url = download_url
-    
-    # Handle file uploads
-    if app_icon:
-        app.app_icon = await save_file(app_icon, "icon")
-    if app_logo:
-        app.app_logo = await save_file(app_logo, "logo")
-    if app_icon:
-        remove_stored_file(app.app_icon)
-        app.app_icon = await save_file(app_icon, "icon")
-    if app_logo:
-        remove_stored_file(app.app_logo)
-        app.app_logo = await save_file(app_logo, "logo")
-    if app_image:
-        remove_stored_file(app.app_image)
-        app.app_image = await save_file(app_image, "image")
-    
-    app.updated_at = datetime.utcnow()
-    db.commit()
-    return {"message": "App updated successfully"}
-
-@admin_router.delete("/apps/{app_id}", tags=["App Management"])
-async def delete_app(password: str, app_id: int, db: Session = Depends(get_db)):
-    """Delete an app"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    app = db.query(App).filter(App.id == app_id).first()
-    if not app:
-        raise HTTPException(status_code=404, detail="App not found")
-
-    for path_value in [app.app_icon, app.app_logo, app.app_image]:
-        remove_stored_file(path_value)
-    
-    db.delete(app)
-    db.commit()
-    return {"message": "App deleted successfully"}
-
-# ==================== SERVICE MANAGEMENT ====================
-@admin_router.get("/services", tags=["Service Management"])
-async def get_all_services(password: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all services"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    services = db.query(Service).offset(skip).limit(limit).all()
-    return {
-        "total": db.query(Service).count(),
-        "services": [
-            {
-                "id": s.id,
-                "name": s.name,
-                "description": s.description,
-                "price": str(s.price),
-                "icon": s.icon,
-                "image_url": s.image_url,
-                "service_type": s.service_type,
-                "grants_business_portal_access": s.grants_business_portal_access,
-                "portal_business_name": s.portal_business_name,
-                "portal_category": s.portal_category,
-                "portal_access_duration_days": s.portal_access_duration_days,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else None
-            } for s in services
-        ]
-    }
-
-@admin_router.post("/services", tags=["Service Management"])
-async def create_service(
-    password: str = Query(...),
-    name: str = Form(...),
-    description: str = Form(...),
-    price: str = Form(...),
-    icon: str = Form(None),
-    service_type: str = Form("app_license"),
-    grants_business_portal_access: bool = Form(False),
-    portal_business_name: str = Form(None),
-    portal_category: str = Form(None),
-    portal_access_duration_days: int = Form(365),
-    service_image: UploadFile = File(None),
-    db: Session = Depends(get_db)
-):
-    """Create a new service with file upload support"""
-    try:
-        if not verify_admin_password(password):
-            raise HTTPException(status_code=401, detail="Invalid admin password")
-        
-        # Validate required fields
-        if not name or not description:
-            raise HTTPException(status_code=400, detail="Name and description are required")
-        
-        # Parse price
-        try:
-            price_float = float(price) if price else 0.0
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="Price must be a valid number")
-        
-        from pathlib import Path
-        import time
-        
-        print(f"📝 Creating service: {name}")
-        
-        # Handle file upload
-        image_path = None
-        if service_image:
-            try:
-                upload_dir = Path("uploads/services")
-                upload_dir.mkdir(parents=True, exist_ok=True)
-                
-                timestamp = str(int(time.time() * 1000))
-                file_extension = service_image.filename.split('.')[-1] if '.' in service_image.filename else 'bin'
-                filename = f"service_{timestamp}.{file_extension}"
-                file_path = upload_dir / filename
-                
-                contents = await service_image.read()
-                with open(file_path, "wb") as f:
-                    f.write(contents)
-                
-                image_path = f"uploads/services/{filename}"
-                print(f"✅ Service image saved: {filename}")
-            except Exception as e:
-                print(f"⚠️ Warning - Could not save service image: {e}")
-        
-        if isinstance(grants_business_portal_access, str):
-            grants_business_portal_access = grants_business_portal_access.lower() in ['true', 'yes', '1']
-        if isinstance(portal_access_duration_days, str):
-            try:
-                portal_access_duration_days = int(portal_access_duration_days)
-            except ValueError:
-                portal_access_duration_days = 365
-
-        new_service = Service(
-            name=name,
-            description=description,
-            price=price_float,
-            icon=icon,
-            image_url=image_path,
-            service_type=(service_type or "app_license").strip() or "app_license",
-            grants_business_portal_access=bool(grants_business_portal_access),
-            portal_business_name=portal_business_name.strip() if portal_business_name else None,
-            portal_category=portal_category.strip() if portal_category else None,
-            portal_access_duration_days=portal_access_duration_days,
-        )
-        db.add(new_service)
-        db.commit()
-        db.refresh(new_service)
-        
-        print(f"✅ Service created successfully with ID: {new_service.id}")
-        
-        return {
-            "message": "Service created successfully", 
-            "service_id": new_service.id, 
-            "service": {
-                "id": new_service.id,
-                "name": new_service.name,
-                "image_url": image_path
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error creating service: {str(e)}")
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error creating service: {str(e)}"
-        )
-
-@admin_router.put("/services/{service_id}", tags=["Service Management"])
-async def update_service(
-    password: str = Query(...),
-    service_id: int = FastAPIPath(...),
-    name: str = Form(None),
-    description: str = Form(None),
-    price: str = Form(None),
-    icon: str = Form(None),
-    service_type: str = Form(None),
-    grants_business_portal_access: bool = Form(None),
-    portal_business_name: str = Form(None),
-    portal_category: str = Form(None),
-    portal_access_duration_days: int = Form(None),
-    service_image: UploadFile = File(None),
-    db: Session = Depends(get_db)
-):
-    """Update a service with file upload support"""
-    try:
-        if not verify_admin_password(password):
-            raise HTTPException(status_code=401, detail="Invalid admin password")
-        
-        service = db.query(Service).filter(Service.id == service_id).first()
-        if not service:
-            raise HTTPException(status_code=404, detail="Service not found")
-        
-        if name:
-            service.name = name
-        if description:
-            service.description = description
-        if price:
-            try:
-                service.price = float(price)
-            except (ValueError, TypeError):
-                raise HTTPException(status_code=400, detail="Price must be a valid number")
-        if icon:
-            service.icon = icon
-        if service_type is not None:
-            service.service_type = (service_type or "app_license").strip() or "app_license"
-        if grants_business_portal_access is not None:
-            if isinstance(grants_business_portal_access, str):
-                grants_business_portal_access = grants_business_portal_access.lower() in ['true', 'yes', '1']
-            service.grants_business_portal_access = bool(grants_business_portal_access)
-        if portal_business_name is not None:
-            service.portal_business_name = portal_business_name.strip() if portal_business_name else None
-        if portal_category is not None:
-            service.portal_category = portal_category.strip() if portal_category else None
-        if portal_access_duration_days is not None:
-            try:
-                service.portal_access_duration_days = int(portal_access_duration_days)
-            except ValueError:
-                service.portal_access_duration_days = 365
-        
-        # Handle file upload
-        if service_image:
-            try:
-                from pathlib import Path
-                import time
-                
-                remove_stored_file(service.image_url)
-                upload_dir = Path("uploads/services")
-                upload_dir.mkdir(parents=True, exist_ok=True)
-                
-                timestamp = str(int(time.time() * 1000))
-                file_extension = service_image.filename.split('.')[-1] if '.' in service_image.filename else 'bin'
-                filename = f"service_{timestamp}.{file_extension}"
-                file_path = upload_dir / filename
-                
-                contents = await service_image.read()
-                with open(file_path, "wb") as f:
-                    f.write(contents)
-                
-                service.image_url = f"uploads/services/{filename}"
-                print(f"✅ Service image updated: {filename}")
-            except Exception as e:
-                print(f"⚠️ Warning - Could not save service image: {e}")
-        
-        service.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(service)
-        
-        return {"message": "Service updated successfully", "service_id": service.id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error updating service: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error updating service: {str(e)}")
-
-@admin_router.delete("/services/{service_id}", tags=["Service Management"])
-async def delete_service(password: str, service_id: int, db: Session = Depends(get_db)):
-    """Delete a service"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    service = db.query(Service).filter(Service.id == service_id).first()
-    if not service:
-        raise HTTPException(status_code=404, detail="Service not found")
-
-    remove_stored_file(service.image_url)
-    
-    db.delete(service)
-    db.commit()
-    return {"message": "Service deleted successfully"}
-
-# ==================== PAYMENT MANAGEMENT ====================
-@admin_router.get("/payments", tags=["Payment Management"])
-async def get_all_payments(password: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all payments"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    payments = db.query(Payment).offset(skip).limit(limit).all()
-    return {
-        "total": db.query(Payment).count(),
-        "payments": [
-            {
-                "id": p.id,
-                "user_id": p.user_id,
-                "amount": str(p.amount),
-                "status": p.status,
-                "stripe_transaction_id": p.stripe_transaction_id,
-                "created_at": p.created_at.isoformat() if p.created_at else None,
-                "updated_at": p.updated_at.isoformat() if p.updated_at else None
-            } for p in payments
-        ]
-    }
-
-@admin_router.get("/payments/{payment_id}", tags=["Payment Management"])
-async def get_payment_details(password: str, payment_id: int, db: Session = Depends(get_db)):
-    """Get payment details"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    payment = db.query(Payment).filter(Payment.id == payment_id).first()
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
-    
-    return {
-        "id": payment.id,
-        "user_id": payment.user_id,
-        "amount": str(payment.amount),
-        "status": payment.status,
-        "stripe_transaction_id": payment.stripe_transaction_id,
-        "created_at": payment.created_at.isoformat() if payment.created_at else None,
-        "updated_at": payment.updated_at.isoformat() if payment.updated_at else None
-    }
-
-# ==================== LICENSE MANAGEMENT ====================
-@admin_router.get("/licenses", tags=["License Management"])
-async def get_all_licenses(password: str, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all licenses"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    licenses = db.query(License).offset(skip).limit(limit).all()
-    return {
-        "total": db.query(License).count(),
-        "licenses": [
-            {
-                "id": l.id,
-                "user_id": l.user_id,
-                "app_id": l.app_id,
-                "service_id": l.service_id,
-                "license_key": l.license_key,
-                "expires_at": l.expires_at.isoformat() if l.expires_at else None,
-                "is_active": l.is_active,
-                "created_at": l.created_at.isoformat() if l.created_at else None
-            } for l in licenses
-        ]
-    }
-
-@admin_router.delete("/licenses/{license_id}", tags=["License Management"])
-async def delete_license(password: str, license_id: int, db: Session = Depends(get_db)):
-    """Delete a license"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    license = db.query(License).filter(License.id == license_id).first()
-    if not license:
+@admin_router.patch("/licenses/{lid}/status")
+def set_license_status(lid: int, payload: dict = Body(...),
+                       actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    l = db.query(License).filter(License.id == lid).first()
+    if not l:
         raise HTTPException(status_code=404, detail="License not found")
-    
-    db.delete(license)
+    l.status = payload.get("status", l.status)
+    l.is_active = l.status == "active"
     db.commit()
-    return {"message": "License deleted successfully"}
+    _audit(db, actor, "license_status", "licenses", lid, {"status": l.status})
+    return {"message": "Updated", "status": l.status}
 
-# ==================== IMAGE MANAGEMENT ====================
-@admin_router.get("/images", tags=["Image Management"])
-async def get_all_images(password: str, page_type: str = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Get all carousel/background images"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    query = db.query(Image)
+
+@admin_router.post("/licenses")
+def admin_issue_license(payload: dict = Body(...),
+                        actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    l = License(
+        user_id=payload["user_id"], license_key=generate_hex_license_key(16),
+        service_id=payload.get("service_id"), app_id=payload.get("app_id"),
+        license_type=payload.get("license_type", "annual"), status="active", is_active=True,
+        max_devices=payload.get("max_devices", 1), starts_at=datetime.utcnow(),
+    )
+    db.add(l)
+    db.commit()
+    db.refresh(l)
+    _audit(db, actor, "create", "licenses", l.id)
+    return row_to_dict(l)
+
+
+@admin_router.get("/tickets/{ref}")
+def admin_ticket(ref: str, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    t = db.query(SupportTicket).filter(SupportTicket.ticket_ref == ref).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return {**row_to_dict(t), "messages": [row_to_dict(m) for m in t.messages]}
+
+
+@admin_router.post("/tickets/{ref}/reply")
+def admin_ticket_reply(ref: str, payload: dict = Body(...),
+                       actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    t = db.query(SupportTicket).filter(SupportTicket.ticket_ref == ref).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    db.add(TicketMessage(ticket_id=t.id, sender="staff", body=payload["body"].strip()))
+    t.status = payload.get("status", "waiting_customer")
+    if t.user_id:
+        db.add(Notification(user_id=t.user_id, type="support", title=f"Reply on ticket {t.ticket_ref}",
+                            body=payload["body"][:140], link="/dashboard/support"))
+    db.commit()
+    return {"message": "Replied", "status": t.status}
+
+
+# --------------------------------------------------------------------------
+#  Navigation reorder / bulk
+# --------------------------------------------------------------------------
+@admin_router.post("/navigation/reorder")
+def nav_reorder(payload: dict = Body(...),
+                actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    for idx, nid in enumerate(payload.get("ids", [])):
+        item = db.query(NavigationItem).filter(NavigationItem.id == nid).first()
+        if item:
+            item.sort_order = idx
+    db.commit()
+    return {"message": "Reordered"}
+
+
+# --------------------------------------------------------------------------
+#  Site content (key/JSON)
+# --------------------------------------------------------------------------
+@admin_router.get("/content")
+def get_all_content(actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    rows = {r.content_key: r.content_value for r in db.query(SiteContent).all()}
+    for k, v in sd.DEFAULTS.items():
+        rows.setdefault(k, v)
+    return rows
+
+
+@admin_router.get("/content/{key}")
+def get_content(key: str, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    r = db.query(SiteContent).filter(SiteContent.content_key == key).first()
+    return {"key": key, "value": r.content_value if r else sd.DEFAULTS.get(key)}
+
+
+@admin_router.put("/content/{key}")
+def put_content(key: str, payload: dict = Body(...),
+                actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    value = payload.get("value", payload)
+    r = db.query(SiteContent).filter(SiteContent.content_key == key).first()
+    if r:
+        r.content_value = value
+        r.updated_at = datetime.utcnow()
+    else:
+        db.add(SiteContent(content_key=key, content_value=value))
+    db.commit()
+    _audit(db, actor, "content", "site_content", key)
+    return {"message": "Saved", "key": key, "value": value}
+
+
+# Legacy pricing endpoints kept for older clients
+@admin_router.get("/pricing")
+def get_pricing(actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    r = db.query(SiteContent).filter(SiteContent.content_key == "pricing").first()
+    return {"pricing": r.content_value if r else sd.PRICING}
+
+
+@admin_router.put("/pricing")
+def put_pricing(pricing: list = Body(...), actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    r = db.query(SiteContent).filter(SiteContent.content_key == "pricing").first()
+    if r:
+        r.content_value = pricing
+    else:
+        db.add(SiteContent(content_key="pricing", content_value=pricing))
+    db.commit()
+    return {"message": "Pricing updated", "pricing": pricing}
+
+
+# --------------------------------------------------------------------------
+#  File uploads (images / product assets / installers)
+# --------------------------------------------------------------------------
+async def _store(file: UploadFile, folder: str, kind: str = "image") -> dict:
+    data = await file.read()
+    validate_upload(file.filename, len(data), kind=kind)
+    d = Path(f"uploads/{folder}")
+    d.mkdir(parents=True, exist_ok=True)
+    ext = file.filename.rsplit(".", 1)[-1].lower()
+    name = f"{folder.replace('/', '_')}_{int(time.time() * 1000)}.{ext}"
+    (d / name).write_bytes(data)
+    return {"path": f"uploads/{folder}/{name}", "size": len(data), "filename": file.filename}
+
+
+@admin_router.post("/upload")
+async def upload_asset(file: UploadFile = File(...), folder: str = Form("misc"),
+                       kind: str = Form("image"), actor: dict = Depends(admin_guard)):
+    try:
+        info = await _store(file, folder.strip("/") or "misc", kind)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "Uploaded", "url": "/" + info["path"], **info}
+
+
+@admin_router.post("/downloads/upload")
+async def upload_installer(
+    product_id: int = Form(...), platform: str = Form(...), version: str = Form(None),
+    architecture: str = Form(None), min_os: str = Form(None), label: str = Form(None),
+    release_notes: str = Form(None), file: UploadFile = File(...),
+    actor: dict = Depends(admin_guard), db: Session = Depends(get_db),
+):
+    try:
+        info = await _store(file, "installers", kind="installer")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    d = Download(product_id=product_id, platform=platform, label=label or file.filename,
+                 file_path=info["path"], version=version, architecture=architecture, min_os=min_os,
+                 file_size=f"{info['size'] // (1024*1024)} MB" if info["size"] > 1024*1024 else f"{info['size']//1024} KB",
+                 release_notes=release_notes, released_at=date.today(), is_active=True)
+    db.add(d)
+    db.commit()
+    db.refresh(d)
+    _audit(db, actor, "create", "downloads", d.id, {"platform": platform})
+    return row_to_dict(d)
+
+
+# --------------------------------------------------------------------------
+#  Carousel / page images  (Image table)
+# --------------------------------------------------------------------------
+@admin_router.get("/images")
+def list_images(page_type: str | None = None, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    q = db.query(Image)
     if page_type:
-        query = query.filter(Image.page_type == page_type)
-    
-    images = query.order_by(Image.order).offset(skip).limit(limit).all()
-    return {
-        "total": query.count(),
-        "images": [
-            {
-                "id": img.id,
-                "filename": img.filename,
-                "alt_text": img.alt_text,
-                "page_type": img.page_type,
-                "app_id": img.app_id,
-                "service_id": img.service_id,
-                "order": img.order,
-                "is_active": img.is_active,
-                "mime_type": img.mime_type,
-                "size": os.path.getsize(img.url) if img.url and os.path.exists(img.url) else (len(img.data) if img.data else 0),
-                "url": img.url,
-                "created_at": img.created_at.isoformat() if img.created_at else None
-            } for img in images
-        ]
-    }
+        q = q.filter(Image.page_type == page_type)
+    rows = q.order_by(Image.page_type, Image.order).all()
+    return {"total": q.count(), "images": [{
+        "id": i.id, "filename": i.filename, "alt_text": i.alt_text, "page_type": i.page_type,
+        "order": i.order, "is_active": i.is_active, "mime_type": i.mime_type,
+        "url": ("/" + i.url) if i.url and not i.url.startswith(("http", "/")) else (i.url or f"/api/media/{i.id}"),
+    } for i in rows]}
 
-@admin_router.get("/images/{image_id}/data", tags=["Image Management"])
-async def get_image_data(password: str, image_id: int, db: Session = Depends(get_db)):
-    """Return a data URL for display by reading the stored file from disk."""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
 
-    image = db.query(Image).filter(Image.id == image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    file_path = None
-    if getattr(image, "url", None):
-        file_path = image.url if image.url.startswith("uploads/") else f"uploads/{image.url}"
-    elif getattr(image, "data", None):
-        base64_data = base64.b64encode(image.data).decode('utf-8')
-        return {
-            "id": image.id,
-            "filename": image.filename,
-            "mime_type": image.mime_type,
-            "data": f"data:{image.mime_type};base64,{base64_data}",
-            "alt_text": image.alt_text
-        }
-
-    if not file_path or not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Image file not found")
-
-    with open(file_path, "rb") as fh:
-        file_bytes = fh.read()
-    base64_data = base64.b64encode(file_bytes).decode('utf-8')
-
-    return {
-        "id": image.id,
-        "filename": image.filename,
-        "mime_type": image.mime_type,
-        "data": f"data:{image.mime_type};base64,{base64_data}",
-        "alt_text": image.alt_text,
-        "path": image.url,
-    }
-
-@admin_router.post("/images", tags=["Image Management"])
-async def upload_carousel_image(
-    password: str = Query(...),
-    file: UploadFile = File(...),
-    alt_text: str = "",
-    page_type: str = "home",
-    app_id: int = None,
-    service_id: int = None,
-    db: Session = Depends(get_db)
+@admin_router.post("/images")
+async def upload_image(
+    file: UploadFile = File(...), alt_text: str = Form(""), page_type: str = Form("home"),
+    app_id: int = Form(None), service_id: int = Form(None),
+    actor: dict = Depends(admin_guard), db: Session = Depends(get_db),
 ):
-    """Upload a carousel or background image and store only the file path in the database."""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-
+    data = await file.read()
     try:
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="No file provided")
-
-        allowed_extensions = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
-        file_extension = file.filename.split('.')[-1].lower()
-        if file_extension not in allowed_extensions:
-            raise HTTPException(status_code=400, detail=f"File type not allowed. Allowed: {', '.join(allowed_extensions)}")
-
-        file_data = await file.read()
-        if not file_data:
-            raise HTTPException(status_code=400, detail="File is empty")
-
-        mime_types = {
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'png': 'image/png',
-            'gif': 'image/gif',
-            'webp': 'image/webp'
-        }
-        mime_type = mime_types.get(file_extension, 'image/jpeg')
-        max_order = db.query(Image).filter(Image.page_type == page_type).count()
-
-        from pathlib import Path
-        upload_dir = Path("uploads/images")
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{page_type}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}_{file.filename}"
-        file_path = upload_dir / filename
-        with open(file_path, "wb") as fh:
-            fh.write(file_data)
-
-        relative_path = f"uploads/images/{filename}"
-        new_image = Image(
-            url=relative_path,
-            data=None,
-            filename=file.filename,
-            mime_type=mime_type,
-            alt_text=alt_text or file.filename.split('.')[0],
-            page_type=page_type,
-            app_id=app_id,
-            service_id=service_id,
-            order=max_order,
-            is_active=True
-        )
-        db.add(new_image)
-        db.commit()
-        db.refresh(new_image)
-
-        return {
-            "message": "Image uploaded successfully",
-            "image_id": new_image.id,
-            "filename": file.filename,
-            "size": len(file_data),
-            "mime_type": mime_type,
-            "path": relative_path,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error uploading image: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error uploading image: {str(e)}")
-
-@admin_router.put("/images/{image_id}", tags=["Image Management"])
-async def update_image(
-    password: str,
-    image_id: int,
-    alt_text: str = None,
-    order: int = None,
-    is_active: bool = None,
-    db: Session = Depends(get_db)
-):
-    """Update image details"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    image = db.query(Image).filter(Image.id == image_id).first()
-    if not image:
-        raise HTTPException(status_code=404, detail="Image not found")
-    
-    if alt_text is not None:
-        image.alt_text = alt_text
-    if order is not None:
-        image.order = order
-    if is_active is not None:
-        image.is_active = is_active
-    
-    image.updated_at = datetime.utcnow()
+        ext = validate_upload(file.filename, len(data), kind="image")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    d = Path("uploads/images")
+    d.mkdir(parents=True, exist_ok=True)
+    fname = f"{page_type}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.{ext}"
+    (d / fname).write_bytes(data)
+    mimes = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+             "webp": "image/webp", "svg": "image/svg+xml", "avif": "image/avif"}
+    max_order = db.query(Image).filter(Image.page_type == page_type).count()
+    img = Image(url=f"uploads/images/{fname}", filename=file.filename, mime_type=mimes.get(ext, "image/jpeg"),
+                alt_text=alt_text or file.filename.rsplit(".", 1)[0], page_type=page_type,
+                app_id=app_id, service_id=service_id, order=max_order, is_active=True)
+    db.add(img)
     db.commit()
-    return {"message": "Image updated successfully"}
+    db.refresh(img)
+    _audit(db, actor, "create", "images", img.id, {"page_type": page_type})
+    return {"message": "Image uploaded", "image_id": img.id, "url": "/" + img.url}
 
-@admin_router.delete("/images/{image_id}", tags=["Image Management"])
-async def delete_image(password: str, image_id: int, db: Session = Depends(get_db)):
-    """Delete a carousel image and its saved file from disk."""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
 
-    image = db.query(Image).filter(Image.id == image_id).first()
-    if not image:
+@admin_router.patch("/images/{image_id}")
+def update_image(image_id: int, payload: dict = Body(...),
+                 actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    img = db.query(Image).filter(Image.id == image_id).first()
+    if not img:
         raise HTTPException(status_code=404, detail="Image not found")
+    for k in ("alt_text", "order", "is_active", "page_type"):
+        if k in payload:
+            setattr(img, k, payload[k])
+    db.commit()
+    return {"message": "Updated"}
 
+
+@admin_router.delete("/images/{image_id}")
+def delete_image(image_id: int, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    img = db.query(Image).filter(Image.id == image_id).first()
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
     try:
-        if image.url:
-            file_path = image.url if image.url.startswith("uploads/") else f"uploads/{image.url}"
-            if os.path.exists(file_path):
-                os.remove(file_path)
-    except Exception as e:
-        print(f"Error deleting file: {e}")
-
-    db.delete(image)
+        if img.url and img.url.startswith("uploads/") and os.path.exists(img.url):
+            os.remove(img.url)
+    except OSError:
+        pass
+    db.delete(img)
     db.commit()
-    return {"message": "Image deleted successfully"}
+    _audit(db, actor, "delete", "images", image_id)
+    return {"message": "Deleted"}
 
-@admin_router.post("/images/reorder", tags=["Image Management"])
-async def reorder_images(password: str, image_ids: list, page_type: str, db: Session = Depends(get_db)):
-    """Reorder carousel images"""
-    if not verify_admin_password(password):
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    for index, image_id in enumerate(image_ids):
-        image = db.query(Image).filter(Image.id == image_id, Image.page_type == page_type).first()
-        if image:
-            image.order = index
-    
+
+@admin_router.post("/images/reorder")
+def reorder_images(payload: dict = Body(...), actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    for idx, iid in enumerate(payload.get("image_ids", [])):
+        img = db.query(Image).filter(Image.id == iid).first()
+        if img:
+            img.order = idx
     db.commit()
-    return {"message": "Images reordered successfully"}
+    return {"message": "Reordered"}
+
+
+# --------------------------------------------------------------------------
+#  Audit log + messages
+# --------------------------------------------------------------------------
+@admin_router.get("/audit")
+def audit_log(limit: int = 200, actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    rows = db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit).all()
+    return [row_to_dict(r) for r in rows]
+
+
+@admin_router.get("/messages")
+def contact_messages(actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    rows = db.query(ContactMessage).order_by(ContactMessage.created_at.desc()).limit(300).all()
+    return [row_to_dict(r) for r in rows]
+
+
+@admin_router.post("/seed")
+def run_seed(actor: dict = Depends(admin_guard)):
+    import seed as seeder
+    seeder.run()
+    return {"message": "Seed complete"}

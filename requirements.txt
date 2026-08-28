@@ -19,3 +19,5 @@ paypalrestsdk==1.7.1
 httplib2==0.22.0
 PyMySQL==1.1.1
 reportlab==4.0.9
+PyJWT==2.8.0
+passlib[bcrypt]==1.7.4
