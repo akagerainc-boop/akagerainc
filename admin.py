@@ -583,6 +583,83 @@ def contact_messages(actor: dict = Depends(admin_guard), db: Session = Depends(g
     return [row_to_dict(r) for r in rows]
 
 
+# --------------------------------------------------------------------------
+#  Applicants — internship + job applications with full detail
+# --------------------------------------------------------------------------
+def _media_url(v):
+    if not v:
+        return None
+    return v if str(v).startswith(("http://", "https://")) else v  # already /api/media/N or a URL
+
+
+@admin_router.get("/applications/{kind}")
+def list_applications(kind: str, status: str | None = None,
+                      actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    if kind not in ("internship", "job"):
+        raise HTTPException(status_code=404, detail="Unknown application kind")
+
+    if kind == "internship":
+        q = db.query(InternshipApplication).order_by(InternshipApplication.created_at.desc())
+        if status:
+            q = q.filter(InternshipApplication.status == status)
+        titles = {i.id: i.title for i in db.query(Internship).all()}
+        out = []
+        for a in q.limit(500).all():
+            out.append({
+                **row_to_dict(a),
+                "position": titles.get(a.internship_id, "—"),
+                "file_url": _media_url(a.cv_path),
+                "file_label": "CV",
+            })
+        return out
+
+    q = db.query(JobApplication).order_by(JobApplication.created_at.desc())
+    if status:
+        q = q.filter(JobApplication.status == status)
+    titles = {j.id: j.title for j in db.query(JobPosition).all()}
+    return [{
+        **row_to_dict(a),
+        "position": titles.get(a.job_id, "—"),
+        "file_url": _media_url(a.resume_path),
+        "file_label": "Resume",
+    } for a in q.limit(500).all()]
+
+
+APPLICATION_STATUSES = ["submitted", "reviewing", "shortlisted", "interview", "offered", "hired", "rejected"]
+
+
+@admin_router.patch("/applications/{kind}/{app_id}")
+def update_application(kind: str, app_id: int, payload: dict = Body(...),
+                      actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = {"internship": InternshipApplication, "job": JobApplication}.get(kind)
+    if not model:
+        raise HTTPException(status_code=404, detail="Unknown application kind")
+    a = db.query(model).filter(model.id == app_id).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if "status" in payload:
+        a.status = payload["status"]
+    if "notes" in payload and hasattr(a, "message"):
+        a.message = payload["notes"]
+    db.commit()
+    _audit(db, actor, "application_status", f"{kind}-applications", app_id, {"status": a.status})
+    return {"message": "Updated", "status": a.status}
+
+
+@admin_router.delete("/applications/{kind}/{app_id}")
+def delete_application(kind: str, app_id: int,
+                      actor: dict = Depends(admin_guard), db: Session = Depends(get_db)):
+    model = {"internship": InternshipApplication, "job": JobApplication}.get(kind)
+    if not model:
+        raise HTTPException(status_code=404, detail="Unknown application kind")
+    a = db.query(model).filter(model.id == app_id).first()
+    if a:
+        db.delete(a)
+        db.commit()
+        _audit(db, actor, "delete", f"{kind}-applications", app_id)
+    return {"message": "Deleted"}
+
+
 @admin_router.post("/seed")
 def run_seed(actor: dict = Depends(admin_guard)):
     import seed as seeder

@@ -9,6 +9,7 @@ If CLOUDINARY_URL is set we upload there instead and just keep the returned URL.
 """
 import io
 import os
+import mimetypes
 
 try:
     from PIL import Image as PILImage
@@ -61,7 +62,7 @@ def process_image(raw: bytes, filename: str, profile: str = "misc") -> tuple[byt
         return raw, "image/jpeg", ext or "jpg"
 
 
-def cloudinary_upload(raw: bytes, filename: str) -> str | None:
+def cloudinary_upload(raw: bytes, filename: str, resource_type: str = "image") -> str | None:
     """Upload to Cloudinary if CLOUDINARY_URL is configured. Returns the secure URL or None."""
     url = os.getenv("CLOUDINARY_URL", "")
     if not url:
@@ -71,8 +72,25 @@ def cloudinary_upload(raw: bytes, filename: str) -> str | None:
         import cloudinary.uploader
         cloudinary.config(cloudinary_url=url, secure=True)
         res = cloudinary.uploader.upload(io.BytesIO(raw), folder="akagerainc",
-                                         resource_type="image", overwrite=False)
+                                         resource_type=resource_type, overwrite=False,
+                                         filename_override=filename, use_filename=True)
         return res.get("secure_url")
     except Exception as exc:  # pragma: no cover
         print(f"[cloudinary] upload failed, falling back to DB blob: {exc}")
         return None
+
+
+def persist_file(db, raw: bytes, filename: str, tag: str = "file") -> str:
+    """
+    Store an arbitrary file (CV, resume, ...) so it survives redeploys.
+    Reuses the `images` table as a generic blob store. Returns a URL.
+    """
+    from models import Image
+    mime = mimetypes.guess_type(filename or "")[0] or "application/octet-stream"
+    cloud = cloudinary_upload(raw, filename, resource_type="raw" if not mime.startswith("image/") else "image")
+    row = Image(url=cloud, data=(None if cloud else raw), filename=filename or "file",
+                mime_type=mime, page_type=tag, is_active=True)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return cloud or f"/api/media/{row.id}"

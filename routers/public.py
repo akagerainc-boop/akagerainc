@@ -293,7 +293,11 @@ def get_media(image_id: int, db: Session = Depends(get_db)):
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
     if img.data:
-        return Response(content=img.data, media_type=img.mime_type or "image/jpeg", headers=_IMG_CACHE)
+        mime = img.mime_type or "image/jpeg"
+        headers = dict(_IMG_CACHE)
+        if not mime.startswith("image/") and img.filename:
+            headers["Content-Disposition"] = f'inline; filename="{img.filename}"'
+        return Response(content=img.data, media_type=mime, headers=headers)
     if img.url:
         if img.url.startswith(("http://", "https://")):
             return RedirectResponse(img.url)
