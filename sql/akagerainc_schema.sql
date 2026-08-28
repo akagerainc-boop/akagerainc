@@ -238,6 +238,20 @@ CREATE TABLE IF NOT EXISTS navigation_items (
   KEY `ix_navigation_items_location` (`location`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS otp_codes (
+  id INTEGER NOT NULL AUTO_INCREMENT, 
+  email VARCHAR(255) NOT NULL, 
+  code_hash VARCHAR(255) NOT NULL, 
+  purpose VARCHAR(30), 
+  attempts INTEGER, 
+  consumed BOOL, 
+  expires_at DATETIME NOT NULL, 
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
+  PRIMARY KEY (id),
+  KEY `ix_otp_codes_email` (`email`),
+  KEY `ix_otp_codes_purpose` (`purpose`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS services (
   id INTEGER NOT NULL AUTO_INCREMENT, 
   name VARCHAR(255) NOT NULL, 
