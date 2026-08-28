@@ -414,24 +414,18 @@ def put_pricing(pricing: list = Body(...), actor: dict = Depends(admin_guard), d
 #  survive redeploys on ephemeral hosts like Render. Installer binaries still go
 #  to disk (too big for the DB) — prefer pasting an external download URL.
 # --------------------------------------------------------------------------
-from media_storage import process_image, cloudinary_upload
+from media_storage import store_image_bytes
 
 
 def _persist_image(db: Session, raw: bytes, filename: str, profile: str = "misc",
                    page_type: str | None = None, app_id: int | None = None,
                    service_id: int | None = None, alt_text: str | None = None) -> Image:
-    cloud_url = cloudinary_upload(raw, filename)
-    if cloud_url:
-        img = Image(url=cloud_url, data=None, filename=filename, mime_type="image/jpeg",
-                    alt_text=alt_text or (filename or "image").rsplit(".", 1)[0],
-                    page_type=page_type, app_id=app_id, service_id=service_id, is_active=True)
-    else:
-        blob, mime, _ext = process_image(raw, filename, profile)
-        order = db.query(Image).filter(Image.page_type == page_type).count() if page_type else 0
-        img = Image(url=None, data=blob, filename=filename, mime_type=mime,
-                    alt_text=alt_text or (filename or "image").rsplit(".", 1)[0],
-                    page_type=page_type, app_id=app_id, service_id=service_id,
-                    order=order, is_active=True)
+    cloud_url, blob, mime = store_image_bytes(raw, filename, profile)  # raises ValueError if too big
+    order = db.query(Image).filter(Image.page_type == page_type).count() if page_type else 0
+    img = Image(url=cloud_url, data=blob, filename=filename, mime_type=mime or "image/jpeg",
+                alt_text=alt_text or (filename or "image").rsplit(".", 1)[0],
+                page_type=page_type, app_id=app_id, service_id=service_id,
+                order=order, is_active=True)
     db.add(img)
     db.commit()
     db.refresh(img)
@@ -462,12 +456,12 @@ async def upload_asset(file: UploadFile = File(...), folder: str = Form("misc"),
                        kind: str = Form("image"), actor: dict = Depends(admin_guard),
                        db: Session = Depends(get_db)):
     data = await file.read()
+    profile = _PROFILE_BY_FOLDER.get(folder.strip("/"), "misc")
     try:
         validate_upload(file.filename, len(data), kind="image")
+        img = _persist_image(db, data, file.filename, profile=profile)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    profile = _PROFILE_BY_FOLDER.get(folder.strip("/"), "misc")
-    img = _persist_image(db, data, file.filename, profile=profile)
     _audit(db, actor, "upload", "images", img.id, {"folder": folder})
     url = img.url if (img.url and img.url.startswith("http")) else f"/api/media/{img.id}"
     return {"message": "Uploaded", "url": url, "path": url, "id": img.id, "filename": file.filename}
@@ -520,10 +514,10 @@ async def upload_image(
     data = await file.read()
     try:
         validate_upload(file.filename, len(data), kind="image")
+        img = _persist_image(db, data, file.filename, profile="carousel", page_type=page_type,
+                             app_id=app_id, service_id=service_id, alt_text=alt_text or None)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    img = _persist_image(db, data, file.filename, profile="carousel", page_type=page_type,
-                         app_id=app_id, service_id=service_id, alt_text=alt_text or None)
     _audit(db, actor, "create", "images", img.id, {"page_type": page_type})
     url = img.url if (img.url and img.url.startswith("http")) else f"/api/media/{img.id}"
     return {"message": "Image uploaded", "image_id": img.id, "url": url}

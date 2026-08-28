@@ -2,9 +2,13 @@ from sqlalchemy import (
     Column, Integer, String, Text, Boolean, DateTime, Date, Numeric,
     ForeignKey, JSON, LargeBinary, Index
 )
+from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
+
+# 4 GB blob on MySQL, plain BLOB elsewhere
+BigBlob = LargeBinary().with_variant(LONGBLOB(), "mysql")
 
 
 # ============================================================
@@ -329,7 +333,7 @@ class Image(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     url = Column(String(500))
-    data = Column(LargeBinary)
+    data = Column(BigBlob)
     filename = Column(String(255))
     mime_type = Column(String(50), default="image/jpeg")
     alt_text = Column(String(255))

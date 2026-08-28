@@ -13,12 +13,16 @@ from media_storage import persist_file
 router = APIRouter(prefix="/api", tags=["Applications"])
 
 
-def _store_cv(db: Session, file: UploadFile | None, tag: str) -> str | None:
+def _store_cv(db: Session, file: UploadFile | None, tag: str) -> tuple[str | None, str | None]:
+    """Returns (url, warning). Never raises — the application must still be accepted."""
     if not file or not file.filename:
-        return None
+        return None, None
     data = file.file.read()
-    validate_upload(file.filename, len(data), kind="doc")
-    return persist_file(db, data, file.filename, tag=tag)
+    try:
+        validate_upload(file.filename, len(data), kind="doc")
+        return persist_file(db, data, file.filename, tag=tag), None
+    except ValueError as e:
+        return None, f"Your file could not be attached: {e} Your application was still submitted — we may email you for it."
 
 
 @router.post("/internships/{slug}/apply", dependencies=[Depends(limiter("apply", 8, 600))])
@@ -38,10 +42,7 @@ async def apply_internship(
     internship = db.query(Internship).filter(Internship.slug == slug).first()
     if not internship:
         raise HTTPException(status_code=404, detail="Internship not found")
-    try:
-        cv_path = _store_cv(db, cv, "application-cv")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    cv_path, warning = _store_cv(db, cv, "application-cv")
 
     app = InternshipApplication(
         internship_id=internship.id, full_name=full_name.strip(), email=email.lower(),
@@ -56,7 +57,8 @@ async def apply_internship(
             pass
     db.add(app)
     db.commit()
-    return {"message": "Application submitted. We'll review it and get back to you."}
+    return {"message": warning or "Application submitted. We'll review it and get back to you.",
+            "cv_stored": cv_path is not None}
 
 
 @router.post("/careers/{slug}/apply", dependencies=[Depends(limiter("apply", 8, 600))])
@@ -72,13 +74,11 @@ async def apply_job(
     job = db.query(JobPosition).filter(JobPosition.slug == slug).first()
     if not job:
         raise HTTPException(status_code=404, detail="Position not found")
-    try:
-        resume_path = _store_cv(db, resume, "application-resume")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    resume_path, warning = _store_cv(db, resume, "application-resume")
 
     db.add(JobApplication(job_id=job.id, full_name=full_name.strip(), email=email.lower(),
                           phone=phone, cover_letter=cover_letter, resume_path=resume_path,
                           status="submitted"))
     db.commit()
-    return {"message": "Application submitted. Thank you for your interest in Akagera Inc."}
+    return {"message": warning or "Application submitted. Thank you for your interest in Akagera Inc.",
+            "resume_stored": resume_path is not None}
