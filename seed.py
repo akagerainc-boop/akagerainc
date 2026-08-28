@@ -41,9 +41,12 @@ def seed_admin(db):
         db.add(user)
         print(f"  + super admin: {email}")
     else:
+        # ADMIN_EMAIL / ADMIN_PASSWORD are the source of truth for the bootstrap
+        # admin — keep the row in sync so changing the env var actually works.
         user.role = "super_admin"
-        if not user.password_hash:
-            user.password_hash = hash_password(password)
+        user.is_active = True
+        user.password_hash = hash_password(password)
+        print(f"  ~ super admin synced: {email}")
     db.commit()
 
 

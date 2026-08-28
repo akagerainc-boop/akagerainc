@@ -70,7 +70,9 @@ def _bootstrap_admin_and_content() -> None:
         finally:
             db.close()
     except Exception as exc:
-        print(f"⚠️ Admin/content bootstrap skipped: {exc}")
+        import traceback
+        _safe_print(f"[bootstrap] skipped: {exc}")
+        _safe_print(traceback.format_exc())
 
 
 _bootstrap_admin_and_content()
@@ -114,6 +116,26 @@ app.add_middleware(
     max_age=86400,
 )
 print(f"[cors] allowed origins: {_origins}")
+
+
+# Catch-all handler so unhandled errors (e.g. a DB outage) still return a JSON
+# response THROUGH the CORS middleware — otherwise the browser reports a
+# misleading "No Access-Control-Allow-Origin" instead of the real 500.
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
+
+
+@app.exception_handler(SQLAlchemyError)
+async def _db_error_handler(request: Request, exc: SQLAlchemyError):
+    _safe_print(f"[db-error] {request.url.path}: {exc}")
+    return JSONResponse(status_code=503, content={"detail": "Service temporarily unavailable (database)."})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error_handler(request: Request, exc: Exception):
+    _safe_print(f"[error] {request.url.path}: {exc!r}")
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
 
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)

@@ -32,17 +32,26 @@ def _content(db: Session, key: str):
 
 
 # ----------------------------- site settings / nav -----------------------------
+_SETTINGS_KEYS = ["brand", "hero", "homepage_sections", "product_categories", "social_links",
+                  "contact_info", "company_info", "whatsapp", "pricing", "seo_defaults",
+                  "industries_intro", "legal_privacy", "legal_terms", "legal_refund", "legal_cookie"]
+
+
 @router.get("/settings")
 def get_settings(db: Session = Depends(get_db)):
-    keys = ["brand", "hero", "homepage_sections", "product_categories", "social_links",
-            "contact_info", "company_info", "whatsapp", "pricing", "seo_defaults",
-            "industries_intro", "legal_privacy", "legal_terms", "legal_refund", "legal_cookie"]
-    return {k: _content(db, k) for k in keys}
+    # The shell (nav/footer/hero/branding) must render even if the DB is down.
+    try:
+        return {k: _content(db, k) for k in _SETTINGS_KEYS}
+    except Exception:
+        return {k: sd.DEFAULTS.get(k) for k in _SETTINGS_KEYS}
 
 
 @router.get("/navigation")
 def get_navigation(db: Session = Depends(get_db)):
-    items = db.query(NavigationItem).order_by(NavigationItem.sort_order).all()
+    try:
+        items = db.query(NavigationItem).order_by(NavigationItem.sort_order).all()
+    except Exception:
+        items = []
     if not items:
         return {"header": sd.HEADER_NAV, "footer": sd.FOOTER_NAV}
     return {
@@ -95,7 +104,7 @@ def list_downloads(platform: str | None = None, db: Session = Depends(get_db)):
     q = db.query(Download).filter(Download.is_active == True)  # noqa: E712
     if platform:
         q = q.filter(Download.platform == platform)
-    rows = q.order_by(Download.released_at.desc().nullslast()).all()
+    rows = q.order_by(Download.released_at.is_(None), Download.released_at.desc()).all()
     out = []
     for d in rows:
         item = serialize_download(d)
@@ -155,7 +164,8 @@ def list_blog(category: str | None = None, q: str | None = None, db: Session = D
     if q:
         like = f"%{q}%"
         query = query.filter(or_(BlogPost.title.ilike(like), BlogPost.excerpt.ilike(like)))
-    return [serialize_blog(p) for p in query.order_by(BlogPost.published_at.desc().nullslast()).all()]
+    rows = query.order_by(BlogPost.published_at.is_(None), BlogPost.published_at.desc()).all()
+    return [serialize_blog(p) for p in rows]
 
 
 @router.get("/blog/{slug}")
