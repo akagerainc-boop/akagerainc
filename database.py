@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -28,6 +29,24 @@ if raw_database_url and raw_database_url.startswith("mysql"):
 else:
     DATABASE_URL = DEFAULT_DATABASE_URL
 
+# Accept provider-style URLs as pasted (e.g. Aiven: mysql://...?ssl-mode=REQUIRED):
+# force the PyMySQL driver and turn the libmysql-only `ssl-mode` flag into a TLS
+# connect arg, which PyMySQL would otherwise reject as an unknown keyword.
+_url = make_url(DATABASE_URL)
+if _url.drivername == "mysql":
+    _url = _url.set(drivername="mysql+pymysql")
+_ssl_mode = str(_url.query.get("ssl-mode") or _url.query.get("ssl_mode") or "").upper()
+_url = _url.difference_update_query(["ssl-mode", "ssl_mode"])
+DB_SSL = _ssl_mode not in ("", "DISABLED") or os.getenv("DB_SSL", "").lower() in ("1", "true", "required")
+DATABASE_URL = _url
+
+_connect_args = {"connect_timeout": 10}
+if DB_SSL:
+    # Encrypt without verifying the server cert (= MySQL's ssl-mode=REQUIRED).
+    # Set DB_SSL_CA to a CA file path to also verify the server.
+    _ca = os.getenv("DB_SSL_CA", "").strip()
+    _connect_args["ssl"] = {"ca": _ca} if _ca else {"check_hostname": False}
+
 # ---------------------------------------------------------------------------
 #  Connection pool
 #
@@ -48,7 +67,7 @@ engine = create_engine(
     pool_timeout=POOL_TIMEOUT,
     pool_recycle=280,          # recycle before typical server-side idle timeout
     pool_pre_ping=True,        # transparently replace dead connections
-    connect_args={"connect_timeout": 10},
+    connect_args=_connect_args,
     echo=os.getenv("DEBUG", "False").lower() == "true",
 )
 
