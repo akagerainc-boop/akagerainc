@@ -209,6 +209,7 @@ HEADER_NAV = [
         {"label": "Software Releases", "url": "/downloads"},
         {"label": "Release Notes", "url": "/downloads?view=notes"},
     ]},
+    {"label": "Mobile Apps", "url": "/mobile-apps", "children": []},
     {"label": "Resources", "url": "/documentation", "children": [
         {"label": "Documentation", "url": "/documentation"},
         {"label": "Blog", "url": "/blog"},

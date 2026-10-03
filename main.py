@@ -37,6 +37,7 @@ from routers import orders as orders_router
 from routers import subscriptions as subscriptions_router
 from routers import support as support_router
 from routers import applications as applications_router
+from routers import mobile_apps as mobile_apps_router
 from payments.service import finalize_payment
 
 
@@ -67,6 +68,7 @@ def _bootstrap_admin_and_content() -> None:
             _seed.seed_site_content(db)
             _seed.seed_admin(db)
             _seed.seed_navigation(db)
+            _seed.ensure_mobile_apps_nav(db)
         finally:
             db.close()
     except Exception as exc:
@@ -163,6 +165,7 @@ app.include_router(orders_router.router)
 app.include_router(subscriptions_router.router)
 app.include_router(support_router.router)
 app.include_router(applications_router.router)
+app.include_router(mobile_apps_router.router)
 
 
 SITE_CONTENT = {
@@ -674,11 +677,15 @@ async def check_card_payment_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== HEALTH CHECK ====================
-@app.get("/health", tags=["Health"])
+# Pinged by an external uptime monitor so Render's free instance never idles out.
+# HEAD is accepted because monitors such as UptimeRobot send HEAD by default.
+# It deliberately skips the DB so pings cost nothing on the shared MySQL host.
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["Health"])
+@app.api_route("/api/health", methods=["GET", "HEAD"], tags=["Health"], include_in_schema=False)
 async def health_check():
     """Health check endpoint"""
     return {
-        "status": "healthy",
+        "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
         "service": "Akagera Inc API"
     }

@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, Date, Numeric,
+    Column, Integer, BigInteger, String, Text, Boolean, DateTime, Date, Numeric,
     ForeignKey, JSON, LargeBinary, Index
 )
 from sqlalchemy.dialects.mysql import LONGBLOB
@@ -688,5 +688,60 @@ class SiteContent(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+
+# ============================================================
+#  MOBILE APPS (admin-uploaded Android APKs at /mobile-apps)
+#
+#  APK bytes live in the DB in ~1 MB chunks: Render's free disk is wiped on
+#  every restart, and a single multi-MB INSERT can exceed max_allowed_packet.
+# ============================================================
+class MobileApp(Base):
+    __tablename__ = "mobile_apps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    slug = Column(String(180), unique=True, index=True, nullable=False)
+    tagline = Column(String(255))
+    description = Column(Text)
+    category = Column(String(80))
+    version = Column(String(40))
+    min_android = Column(String(40))
+    whats_new = Column(Text)
+    icon = Column(String(500))
+    screenshots = Column(JSON)                   # list of media URLs, at least 3
+    apk_file_id = Column(Integer)                # -> mobile_app_files.id (no FK: avoids a cycle)
+    apk_url = Column(String(500))                # optional external download link
+    apk_filename = Column(String(255))
+    apk_size = Column(BigInteger)
+    apk_uploaded_at = Column(DateTime(timezone=True))
+    download_count = Column(Integer, default=0)
+    is_published = Column(Boolean, default=False, index=True)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class MobileAppFile(Base):
+    __tablename__ = "mobile_app_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    app_id = Column(Integer, ForeignKey("mobile_apps.id", ondelete="CASCADE"), index=True)
+    filename = Column(String(255))
+    size = Column(BigInteger, default=0)
+    sha256 = Column(String(64))
+    chunk_count = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class MobileAppFileChunk(Base):
+    __tablename__ = "mobile_app_file_chunks"
+
+    id = Column(Integer, primary_key=True)
+    file_id = Column(Integer, ForeignKey("mobile_app_files.id", ondelete="CASCADE"), nullable=False)
+    seq = Column(Integer, nullable=False)
+    data = Column(BigBlob, nullable=False)
+
+
 Index("ix_downloads_product_platform", Download.product_id, Download.platform)
 Index("ix_images_page_active", Image.page_type, Image.is_active)
+Index("ix_mobile_app_chunks_file_seq", MobileAppFileChunk.file_id, MobileAppFileChunk.seq, unique=True)

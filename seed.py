@@ -76,6 +76,25 @@ def seed_navigation(db):
     print("  + navigation seeded")
 
 
+def ensure_mobile_apps_nav(db):
+    """Add the /mobile-apps header link to an already-seeded nav (seed_navigation skips non-empty tables)."""
+    if db.query(NavigationItem).filter(NavigationItem.url == "/mobile-apps").first():
+        return
+    downloads = db.query(NavigationItem).filter(NavigationItem.location == "header",
+                                                NavigationItem.parent_id == None,  # noqa: E711
+                                                NavigationItem.url == "/downloads").first()
+    order = downloads.sort_order if downloads else 0
+    # make room right after "Downloads"
+    for item in db.query(NavigationItem).filter(NavigationItem.location == "header",
+                                                NavigationItem.parent_id == None,  # noqa: E711
+                                                NavigationItem.sort_order > order).all():
+        item.sort_order += 1
+    db.add(NavigationItem(location="header", label="Mobile Apps", url="/mobile-apps",
+                          sort_order=order + 1, is_enabled=True))
+    db.commit()
+    print("  + mobile apps nav link added")
+
+
 def seed_categories(db):
     if db.query(Category).count() > 0:
         return

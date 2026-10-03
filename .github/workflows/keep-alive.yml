@@ -1,0 +1,25 @@
+# Backup keep-alive for the Render free instance (it sleeps after 15 min idle).
+# Primary: an external uptime monitor (UptimeRobot / cron-job.org) hitting /health
+# every 5 minutes. GitHub may delay scheduled runs, and disables them after 60 days
+# without repo activity, so this is a safety net, not the main mechanism.
+name: keep-alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL || 'https://akagerainc-9vkh.onrender.com/health' }}
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$HEALTH_URL") && [ "$code" = "200" ] && { echo "ok ($code)"; exit 0; }
+            echo "attempt $i got $code, retrying"; sleep 20
+          done
+          exit 1
